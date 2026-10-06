@@ -3,7 +3,7 @@
 :: Nothing but Microsoft-hosted source links and no third-party tools; script just configures an xml and starts MCT
 :: Ingenious support for business editions (Enterprise / VL) selecting language, x86, x64 or AiO inside the MCT GUI
 :: Changelog: 2026.10.06 windows 11 24H2 / 25H2 / 26H2 - see readme for details
-:: - 25H2+ MCT gets its catalog from the update service, so products11_25H2.xml / products11_26H2.xml ship with the script
+:: - 25H2+ MCT gets its catalog from the update service, so script rebuilds it from the 24H2 one with embedded esd links
 :: - 24H2+ setup checks: hwreqchk registry vars via auto.cmd on upgrade, LabConfig keys added to boot.wim on clean install
 :: on upgrade: latest build, on offline install: 11 26H2 26300.9457 / 11 25H2 26200.6899 / 11 24H2 26100.4349 / 11 23H2 22631.2861 / 11 22H2 22621.1702 / 11 21H2 22000.318 / 22H2 19045.2965 / 21H2 19044.1288 / 21H1 19043.1348 / 20H2 19042.1052
 
@@ -146,15 +146,15 @@ goto choice-%MCT%
 
 :choice-20
 set "VER=26300" & set "VID=11_26H2" & set "CB=26300.9457.260913-1737.26h2_ge_release_svc_refresh" & set "CT=2026/09/" & set "CC=2.1"
-set "XML=https://raw.githubusercontent.com/travisling21/MediaCreationTool.bat/main/products11_26H2.xml"
+set "CAB=https://download.microsoft.com/download/8e0c23e7-ddc2-45c4-b7e1-85a808b408ee/Products-Win11-24H2-6B.cab"
 set "EXE=https://download.microsoft.com/download/0a8b07d9-a3bf-47b9-b71b-8e13354cec88/MediaCreationTool.exe"
-goto process ::# windows 11 26H2 - no static products.cab from microsoft since 25H2, catalog captured from MCT 26100.7019 ships with script
+goto process ::# windows 11 26H2 - no static products.cab since 25H2: 24H2 cab is the template, 26300 esd links inserted from UUP csv at the end
 
 :choice-19
 set "VER=26200" & set "VID=11_25H2" & set "CB=26200.6899.251011-1532.25h2_ge_release_svc_refresh" & set "CT=2025/10/" & set "CC=2.1"
-set "XML=https://raw.githubusercontent.com/travisling21/MediaCreationTool.bat/main/products11_25H2.xml"
+set "CAB=https://download.microsoft.com/download/8e0c23e7-ddc2-45c4-b7e1-85a808b408ee/Products-Win11-24H2-6B.cab"
 set "EXE=https://download.microsoft.com/download/0a8b07d9-a3bf-47b9-b71b-8e13354cec88/MediaCreationTool.exe"
-goto process ::# windows 11 25H2 - enablement package on the 24H2 base, catalog captured from MCT ships with script, all esd links on microsoft servers
+goto process ::# windows 11 25H2 - enablement package on the 24H2 base: 24H2 cab is the template, 26200 esd links inserted from UUP csv at the end
 
 :choice-18
 set "VER=26100" & set "VID=11_24H2" & set "CB=26100.4349.250607-1500.ge_release_svc_refresh" & set "CT=2025/06/" & set "CC=2.0"
@@ -335,8 +335,8 @@ fltmc>nul||(set A=/d /x /c set "ROOT=%ROOT%"^& start "MCT" "%~f0" %* %set%& powe
 mkdir "%WORK%\MCT" >nul 2>nul & attrib -R -S -H "%WORK%" /D & pushd "%WORK%\MCT"
 del /f /q products.* *.key EI.cfg PID.txt auto.cmd AutoUnattend.xml >nul 2>nul
 set /a latest=0 & if exist latest set /p latest=<latest
-echo;20261006>latest & if %latest% lss 20211116 del /f /q products*.* MediaCreationTool*.exe >nul 2>nul
-if %latest% lss 20261006 del /f /q products11_25H2.* products11_26H2.* MediaCreationTool11_25H2.exe MediaCreationTool11_26H2.exe >nul 2>nul
+echo;20261007>latest & if %latest% lss 20211116 del /f /q products*.* MediaCreationTool*.exe >nul 2>nul
+if %latest% lss 20261007 del /f /q products11_25H2.* products11_26H2.* >nul 2>nul
 
 ::# edition fallback to ones that MCT supports - after selection
 (set MEDIA_EDITION=%MEDIA_EDITION:Eval=%)
@@ -396,7 +396,7 @@ if %PRE% leq 3 %<%:6f " %MEDIA_LANGCODE% "%>>%  &  %<%:9f " %MEDIA_CFG% "%>>%  &
 echo;
 
 ::# download MCT and CAB / XML - new snippet to try via bits, net, certutil, and insecure/secure
-::# a products%VID%.xml or products%VID%.cab next to the script is used instead of the download (25H2+ catalogs ship with the script)
+::# a products%VID%.xml or products%VID%.cab placed next to the script is used instead of the download - for any version
 for %%s in (xml.cab cab.xml) do if exist "%ROOT%\products%VID%.%%~ns" copy /y "%ROOT%\products%VID%.%%~ns" products%VID%.%%~ns >nul 2>nul && del /f /q products%VID%%%~xs >nul 2>nul
 for %%s in (xml cab) do if exist "%ROOT%\products%VID%.%%s" echo;%ROOT%\products%VID%.%%s
 if defined XML if not exist "%ROOT%\products%VID%.cab" del /f /q products%VID%.cab >nul 2>nul
@@ -408,13 +408,16 @@ if exist products%VID%.cab del /f /q products%VID%.xml >nul 2>nul
 if exist products%VID%.cab expand.exe -R products%VID%.cab -F:* . >nul 2>nul
 set "/hint=Check urls in browser | del ESD dir | use powershell v3.0+ | unblock powershell | enable BITS serv"
 echo;& set err=& for %%s in (products.xml MediaCreationTool%VID%.exe) do if not exist %%s set err=1
-::# refuse to build the wrong media if the catalog does not list the requested build (stale cache or wrong products file)
-if not defined err if %VER% geq 26100 findstr /m /l /c:"%VER%." products.xml >nul 2>nul || (set err=1& set "/hint=products.xml does not list build %VER% - delete %WORK%\MCT or put a valid products%VID%.xml next to the script")
 if defined err (%<%:4f " ERROR "%>>% & %<%:0f " %/hint% "%>%) else if not defined err %<%:0f " %PRESET% "%>%
 if defined err (del /f /q products%VID%.* MediaCreationTool%VID%.exe 2>nul & pause & exit /b1)
 
 ::# configure products.xml in one go via powershell snippet - most of the MCT fixes happen there
 call :PRODUCTS_XML
+
+::# refuse to build the wrong media if the configured catalog does not list the requested build (stale cache / missing esd links)
+if %VER% geq 26100 findstr /m /l /c:"%VER%." products.xml >nul 2>nul || set err=1
+if defined err (%<%:4f " ERROR "%>>% & %<%:0f " products.xml does not list build %VER% - delete %WORK%\MCT dir and retry "%>%)
+if defined err (del /f /q products%VID%.* MediaCreationTool%VID%.exe 2>nul & pause & exit /b1)
 
 ::# repack XML into CAB
 makecab products.xml products.cab >nul
@@ -1071,6 +1074,24 @@ function PRODUCTS_XML { [xml]$xml = [io.file]::ReadAllText("$pwd\products.xml",[
      }}
    }
  }
+#:: 11 25H2+ : rewrite the 24H2 template file entries with the esd links the official MCT gets from the update service (UUP csv)
+ if ([int]$ver -ge 26200) {
+   $uup = ([io.file]::ReadAllText($env:0) -split ':PS_INSERT_UUP_CSV\:')[1]
+   $rows = ConvertFrom-CSV -Input $uup | & { process { if ($_.Ver -eq $ver) {$_} } } | group Client,Lang -AsHashTable -AsString
+   $dl = 'http://dl.delivery.mp.microsoft.com/filestreamingservice/files/'
+   $root.Files.File | & { process {
+     if ($_.FileName -like "$ver.*") {return} #:: already lists the requested build (products.xml captured from the official MCT)
+     $i = $_.FileName.IndexOf('_CLIENT'); if ($i -lt 1 -or $_.Architecture -ne 'x64') {$root.Files.RemoveChild($_) >$null; return}
+     $suffix = $_.FileName.Substring($i); $cli = 'ret'
+     if ($suffix -like '_CLIENTBUSINESS_*') {$cli = 'vol'} elseif ($suffix -like '_CLIENTCHINA_*') {$cli = 'chn'}
+     $item = $null; if ($null -ne $rows) {$item = $rows["$cli, $($_.LanguageCode)"]}
+     if ($null -eq $item) {$root.Files.RemoveChild($_) >$null; return}
+     $name = $env:CB + $suffix; $_.FileName = $name; $_.Size = $item[0].Size; $_.FilePath = $dl + $item[0].Guid + '/' + $name
+     $sha1 = $_.SelectSingleNode('Sha1')
+     if ($null -ne $sha1) {$sha = $xml.CreateElement('Sha256'); $sha.InnerText = $item[0].Sha256; $_.ReplaceChild($sha, $sha1) >$null}
+     elseif ($null -ne $_.SelectSingleNode('Sha256')) {$_.Sha256 = $item[0].Sha256}
+   }}
+ }
 #:: clone Professional / Enterprise to work around MCT quirks when host OS is ProEdu / ProWS / EnterpriseS / Embedded
  $source = 'Enterprise'; $sourceN = 'EnterpriseN'; $clone = 'Embedded','IoTEnterpriseS','EnterpriseS'; $cloneN = 'EnterpriseSN'
  if ($ver -le 10586) {$source = 'Professional'; $sourceN = 'ProfessionalN'; $clone +='Enterprise'; $cloneN+='EnterpriseN'}
@@ -1522,3 +1543,166 @@ function PRODUCTS_XML { [xml]$xml = [io.file]::ReadAllText("$pwd\products.xml",[
 ::#,19043,vol,uk-ua,3633073140,2601657108,d3d06977ed2de7352489317563099c80093125cd,c5a6725fc7b6e5e58d680259ab827de6621f919f,d,d
 ::#,19043,vol,zh-cn,3885377254,2847833439,d6cc640b4cbc484e5d41cc966b3e105193c18ffd,dcdcfca5a388059e2db9cb55e950f29282bec529,d,c
 ::#,19043,vol,zh-tw,3856202777,2825194480,fac5d12d42d7aa7bbcad36b1314923a776e1a5c9,ae7a1a1d9212269227330c5298687887a1f5621d,d,d
+
+::--------------------------------------------------------------------------------------------------------------------------------
+::# 11 25H2 / 26H2 esd links: since 25H2 the official MCT gets its catalog from the update service instead of a static products.cab
+::# so the script downloads the 24H2 products.cab from microsoft as template and rewrites its 26100 file entries with these links
+::# Condensed ver,client,lang,size,sha256,guid - recomposed into http://dl.delivery.mp.microsoft.com/filestreamingservice/files/guid/name.esd
+::# client: ret = CLIENTCONSUMER_RET (Home/Pro/Edu), vol = CLIENTBUSINESS_VOL (Pro VL/Enterprise), chn = CLIENTCHINA_RET (zh-cn only)
+::# [Dev] to refresh after a new build: run the official MCT once and take C:\$WINDOWS.~WS\Sources\Windows\sources\products.xml
+::# every link below was checked against microsoft servers (HTTP 200 and matching Size) on 2026.10.06
+:PS_INSERT_UUP_CSV:_,Ver,Client,Lang,Size,Sha256,Guid
+::#,26200,chn,zh-cn,5098235252,7def0db122b6abc0abb58de6f8c077a028e4f9e34ed0704dc67714a4e247023a,141efdd8-a965-4fd2-b53b-5268f591a0d2
+::#,26200,ret,ar-sa,5062075199,5fa74108d9ef5a3084af7265c22cbafe3c8b70dbfd2f711455762cb1057faaba,ab3d370f-1bea-4cfb-8cb3-6cb1e9b702bf
+::#,26200,ret,bg-bg,5133512415,56485e90bf5353431880ba2b062d44ab5faa3e60c01f400eb07108f1371639b2,36b79804-fec0-448b-8196-b689effda474
+::#,26200,ret,cs-cz,5115115994,f4d47c95877f469c99951e5dae9af7053c65d8f15331a687d135c41e3f3582ac,db1825b7-e71b-421b-ab45-4288c2e92ba3
+::#,26200,ret,da-dk,5167086146,005275072c6406aca4446b16c0e0ecd8bf6109acfdfab13b869f2276df502129,fd186fa2-81e8-40b1-9be8-d9f8edeacf67
+::#,26200,ret,de-de,5254823730,527e5128dd515d0fb7c16da75f813f8fe3a190cfb75c75a5aff7d6db5897fd03,d7674ac2-b57f-476b-9534-daeb3fb42472
+::#,26200,ret,el-gr,5159934626,e890dbf284db439cb00e3ae8d49abcabdf5bc43a8ad1ef5853423d27a9c97bf3,6e0a18e4-7f96-4cc6-8636-e97bcf303253
+::#,26200,ret,en-gb,5265784383,dafb0ae1239cf68aa1f02171a7934a9ac85b3cdacfc1f3cab5dbef59821c1eec,4d4f990f-1a17-4f96-98be-e33c7f96173b
+::#,26200,ret,en-us,5245433539,0a6c0dcc3cce095207447390b87992936a3d02f9ee76ec404d7b351f611224f1,0164917d-ef6d-4e13-bc12-47f2c6263fe2
+::#,26200,ret,es-es,5240421325,2284b81a43335a6119ba2d226f7c2d1a0e265b480b786519f855524c658cc5c6,6b0a1d93-e2f3-43e1-847f-0fcff86c116b
+::#,26200,ret,es-mx,5103608566,5c51f5acb8c266eed487611638e536685d3c8cfdb851bce0a36d791be50c225a,b75865c4-c622-460d-8086-47f4be2bce29
+::#,26200,ret,et-ee,5108852105,e58f3a0bd065501b02193674eba2e4f9c9e68c9e08feb3559ec2f0b59084ca6e,ac2b96bb-d718-40a7-92a8-7494c255f423
+::#,26200,ret,fi-fi,5139381214,729cd0fc8bbf93fee2f410191c092fd58168547c553325b4e4921cd31d32dd49,62cb1b7c-7514-4dd5-83a4-bfcd478e746e
+::#,26200,ret,fr-ca,5095759287,7259f75e952f8b5f9ae87e2da615a6815ea548d6e56f5c5c239fff29bf8fc15b,8bfb6eb9-31d3-4b1f-b6ca-fea8815fc327
+::#,26200,ret,fr-fr,5255179069,72406fc608d6736943bc97c0affd51e3a0f2bab4c5d57e84441a95a2321bebc1,57097aac-7b30-4986-8930-b0aadd11bad8
+::#,26200,ret,he-il,5046081079,11e594338c42fe349ec415429319ec60a861d581c91759921c4253d56899f479,523e427f-27ed-40a1-b49e-11302c472576
+::#,26200,ret,hr-hr,5105429764,d6d5751ea0649d061973f9b1eb516ae6cc673c69c32aea394e4d196b1410d54b,f314075c-d7c5-48a8-9e8c-6cdae9bbd3e9
+::#,26200,ret,hu-hu,5122594006,ae1fbb29ae7a035461edbbea68b55432388827d5a52c16d3990769e829e233f7,60e354ce-429b-4129-8a3f-6a0eb15e57a8
+::#,26200,ret,it-it,5162269211,cf1d464bf58a1dc54c2d828f34c0cbe3bca2e799c2f06a91c1f1884d8c0ad445,30893613-0956-4ae4-acf4-f9f5a8f3c22c
+::#,26200,ret,ja-jp,5236236824,bd70e7539d6c9904c26a179a670d991222fb312e6560ba81a65059c8fa9006c8,aca83cc7-1aa8-4154-be95-4798daff92f5
+::#,26200,ret,ko-kr,5086474469,7054831aa5e84de581f262b3dfca9ddbb7b5cdb8c15493374b7f11390bf11b94,7aa8218d-8420-4bb3-99cb-8917755b58c9
+::#,26200,ret,lt-lt,5097435457,3aeaaba77d9d63e231f0ad8db4c08047ce3d5d189ff7e41a84cc8c321f5f6aa2,d7f924d4-00c4-41de-b38d-2ee6f0c4d5ea
+::#,26200,ret,lv-lv,5093004514,b7f47440725b84b996d30165e76842778e80ad811796e6e91b74f5951ca41ebf,19435016-4421-44fc-b12e-797080b045fc
+::#,26200,ret,nb-no,5119738360,b8b526ebe823902af61c137c295c099471e1fc38a0f594fd18e7b2930f4e6a01,b1f3370d-b3cb-4bae-bc73-647c35ed4e6c
+::#,26200,ret,nl-nl,5143403835,46e130ef50df6235f8ec92c66f75afe82648fbfcd91806b018a6782e3a4bc944,a0ecf675-b13e-4f4b-a703-2bda91c68d6d
+::#,26200,ret,pl-pl,5152371825,11a51628e5d9cf66bdfa1d4f38e905338c08a95992ea0dd2e00b2d676da6f52e,26d8b7d9-0530-4102-9a2a-0bfe4c6ef4fd
+::#,26200,ret,pt-br,5089675748,8f3d7bd8d8f5154eee2282c61ee4088f0f7ea4bd9e1582990048178f90913ae9,ef72b822-8496-4296-98e6-52a69ada5608
+::#,26200,ret,pt-pt,5188088610,8ee7c3ffd3eb99548fce0bf1bac27984ac29469a0e53690f50c38951bc6224b6,d337ba78-f7a0-40ef-b3c0-984f4a66b29c
+::#,26200,ret,ro-ro,5097964420,b6a58ee56ea69b270e2a296bea4248f9e55c42b49a16a90c97de6d9f88a38efa,e7392ac9-9e2d-4cf2-ae75-b0f98f29b298
+::#,26200,ret,ru-ru,5115057398,32ce07575505749ac00390eddbda75b5da91906c88f5fa3357370fbb98f97307,de4fede5-a1c9-472a-870b-2fde7866b4e3
+::#,26200,ret,sk-sk,5116423099,44b9e9e422b1def7c4bb5953b6e3bdb36da3b4017dd6c75911fecedd566c16cb,7e2a9145-759f-45cc-93a8-f5bec5a9e1a8
+::#,26200,ret,sl-si,5119161644,e7773ac49cca1af3d67da08a5d69cdfa47c1684f3923da946c4ae54c04dbe288,1854eef7-0a96-4c3c-aa2d-83301793b53a
+::#,26200,ret,sr-latn-rs,5027760895,ed139027765115fd61d47d1d99afef676cb6ffec43f68b69e0376689b4fdd3a4,c661da3e-95d2-4f1c-b26d-d188ad541f4a
+::#,26200,ret,sv-se,5131343578,44a13b0c4e0b581cd6f9b51266ff54f66cc2fac4ca0fb9f008537739069fbb53,91eee71d-bf38-4dda-8273-97cca301565c
+::#,26200,ret,th-th,5047944192,0e22183617517c07bb3adcbe08c53ebe0ef3f78959d5e7c4b662e7c1c3181ece,dfc6fcb4-69b6-40c0-bb95-814e08347315
+::#,26200,ret,tr-tr,5057852273,9dd2b2d0d16ea9d9f8dd5fea1ffe9ff0eeba597cd6ff4c2c36dfec978c4dd015,9d754d4f-a304-4da2-94ab-746c3a5aaff7
+::#,26200,ret,uk-ua,5047107433,487b44aff6e2a48ea10dd4c21cf5d88171b5c037d460abedaf43a4392c3125e1,a4dc0d9b-a807-4933-bb23-c0e69605d051
+::#,26200,ret,zh-cn,5339851054,a95993a093d6735a2984c019f53d1704e095d132c780127a976686a0f007448a,0d753f1a-fb64-4e0c-ad86-45a489c050f1
+::#,26200,ret,zh-tw,5252552366,42e33312a3e584243364f617c44ae40e4253f7bd4b6ae161fdeaa6db597c0603,a1098807-e762-47d5-b91e-a2d490327a59
+::#,26200,vol,ar-sa,5016059682,b91064e425883dbc9ec416049cdf9e6b36025bb2b6f5a88aa5b72d95c31fd9d3,c9dcc260-e7be-457a-ad38-5974df598ef8
+::#,26200,vol,bg-bg,5082874876,4c8f8f71c68d94be63fc1ea6e10d947d122f6bfbfa78e47347af87296156bd4a,398179cb-02eb-43b3-b4bd-4396f48b343f
+::#,26200,vol,cs-cz,5078191033,5187b7c4c9bbd1ec414f0dfc03d74d9425c3d0065462ec801ec2e274cea22aa2,5c452f4b-b736-479b-95f4-94f826c721b2
+::#,26200,vol,da-dk,5097686236,ed0f8d19317111691fe48dd3ab0dbfe887bbb7e592cb49ff5d3b49f76b72c69a,3bc79d2e-b156-46c5-8fd8-abaf67d019ab
+::#,26200,vol,de-de,5189023986,8194f1dda4b78ae92c153babe07395e5195c7e182c9ebf006c7fe79782fc179b,b34a30dd-e872-47e3-907b-eddb1637f13e
+::#,26200,vol,el-gr,5086806425,2a0f202cad19b0db27169f243fe1c1b8eb01151ce74be5cd98b9c0fde723d69e,22841f7b-72cd-4062-bedf-b0e21646018f
+::#,26200,vol,en-gb,5176850495,f09b1e92ecd4643506d876545b41a1bd3494627e46d7e4722bda6fd47d8d248e,bcfed1aa-fbd5-466e-8c15-4b213e30faec
+::#,26200,vol,en-us,5162646361,493126e4511c70c31ae7d3252ccdf233ac208553cefdd49db5f3272c906a7229,6f3fd3e1-699a-4e7f-9d77-a963a0018813
+::#,26200,vol,es-es,5181210770,9dc5303b75b3c9c329f468506f895fa7be374ff6d842150ce40cacc66bb33476,19a9fd78-cb66-491c-8090-f9ec2506c639
+::#,26200,vol,es-mx,5027637903,75365ba2307fbeb372c4441af57e22a7a4fd3405ec4207c3af76bd2e6f16ebba,9224ad9b-d5c4-48bf-b5c9-12efc3bf735e
+::#,26200,vol,et-ee,5049876864,df7b07fd470fabe0ac0a40a13c6c154e4898833511efa3d2ad8e441c6a6fd6e8,f76b97cc-68dd-4c18-9672-90b3a0641f5d
+::#,26200,vol,fi-fi,5079413038,74ff548aeb7ff242247115fd7f6b2592e58285ef3837059111aec994900eadbc,2742961f-aff7-4ec5-9d2a-5a2637e6eff2
+::#,26200,vol,fr-ca,5046874203,2a3b3f020b10a80502d9e2180538cd533a0438dc78d7f857b5c31394722d1c4a,304f3c1c-8734-4433-ae58-27808c2f4030
+::#,26200,vol,fr-fr,5152512228,7ff3a796b538982a01ff7321d3e43318f0632e1ecc3c95bef592c9198f30b630,d66cbd59-9187-4e9d-8635-53369844b9e1
+::#,26200,vol,he-il,5037523010,33dde19b1db91af5856e88b7d11cb07122ad2a7809c1ad20af50899d1577682c,f6ba5637-eb88-42fb-9fa3-58b85a481776
+::#,26200,vol,hr-hr,5036809841,8af9164c5066d9cb15ce87e5a479e1c95e5b19acfaec33a1ce650e1884cc205a,5b78cd32-d1b2-4e83-93f6-2609b7ec0803
+::#,26200,vol,hu-hu,5083269464,7ba396b355cceb493d85a89ea430a7ef6509c62a8fdd8f4ba9afe63ffd7093ee,8d486fe0-389e-4b7b-acce-b297736be5cd
+::#,26200,vol,it-it,5106802660,7282517800b2b23e54ff3eb352a9714f020f8ea4fe1fddd7be8513d67949c00b,76040aaf-74cd-499e-bf1d-0dbcf8f0c767
+::#,26200,vol,ja-jp,5223103654,159aa9d61bb4b4917be8cadfaa61a7a07ccd9de9dc63512750ffc5f909b00736,b74e5dcf-ac79-4afa-aeb7-d708469fc13a
+::#,26200,vol,ko-kr,5032124633,7ebe0767ee77574773ac5c238b6f9f41b2359c8387856b4dbb3937aeb00f29a7,f2ef7d95-1f68-45a7-ba55-721bfc95fe12
+::#,26200,vol,lt-lt,5034255843,25974595e363cea1a77e0c7def811457a9068200f3045c8747e1f299afc5a483,d56275a8-094b-410d-8df3-a1f32213da86
+::#,26200,vol,lv-lv,5041553054,37dac70b0ac2230f990c12ba9309547467e3270f07de39b14b279298c772566f,a63055a2-2ed5-4d63-9077-9e11b327b5ed
+::#,26200,vol,nb-no,5067059264,108beaea5c6a49d885c699f2f3f225b61507f1aa674c609a48a2e29f6d8701f5,00d00c4f-ad06-47c5-985c-2a7d5e3a2c7c
+::#,26200,vol,nl-nl,5077614640,c609573c4dc7f082ab6374fc152a4ebfff56169a7e3f6cd88c5d9034b3ac1b33,7a133eee-8cd1-40d9-8140-8d94a3f91b26
+::#,26200,vol,pl-pl,5117701445,f59febb6edce1bd688be36df0facd377a5cefbce1474b2deb085cd6c30595112,7d7d9220-e56e-4fbc-b7b7-be984da9dfb1
+::#,26200,vol,pt-br,5004787567,f736f4159c7a2c4e3a6c6db080cf399e2ca01ecb982aaae1723e78337fb5a5f4,5e4b743d-0149-42b7-8562-02f4aac5d2e3
+::#,26200,vol,pt-pt,5096813645,e64dfc3e4bf4b23b12080df5a32f4b8f57642cee9db3a7140f5f0a2195c18878,7754d131-b4cc-4f6c-a41a-0d21fe3604e8
+::#,26200,vol,ro-ro,5034480167,7d56f3c0d58aacd3ce0b59315cf88120d1ef96aa97fcfdcda5894db448f98163,1b660443-3b94-4945-b480-24ce4962d038
+::#,26200,vol,ru-ru,5024680099,ca50e7e1d808585f19fe40db9f067a66cd1a25cca950d9957ef807fcb4f2b12b,14315c23-428f-40e5-a568-e90849183cfe
+::#,26200,vol,sk-sk,5069659210,8b66d8a5d6312a7193b3b9b7f30ce399a4cb73fe85cf3eae3cc2020fa1e7a2a5,bbcd1df8-6e1b-4c5d-88b3-65b507a3e36c
+::#,26200,vol,sl-si,5055013809,61b6c3e148e688686b69a49302ab3cc109bf5979f895fbb907a0cf4df8529c7a,9493e9f4-ec6d-4afd-a784-4854551cdd56
+::#,26200,vol,sr-latn-rs,4954330826,01cbef5a284758b8328cf1763084d4cad54fa3a0f508854f7c7588341370a70c,841dceca-5c49-40ba-81ed-e82d251f480f
+::#,26200,vol,sv-se,5074585024,fab2883025440d280ea102adaf8391c247b4f1dcd9f072ca62b4531b98e75608,7422df87-9418-407b-b64e-aaeab2f05837
+::#,26200,vol,th-th,4981149968,cf6ce002d9ed0212da17908d9401115b8255c1dd64480bdbd6fd1109c73398ae,f1c50a8e-f49d-4eb5-bd0c-ee5c0f017bb0
+::#,26200,vol,tr-tr,4979836631,beb691da8c14c775c34712a484644399e609e4f67c7a94511a4dbf3ca9c57f95,4d74434e-3e2d-4a38-9ed1-d75a5d5a05dd
+::#,26200,vol,uk-ua,4990183591,cde2c594251031b18345f24be069b60a3b5bc3dd1ebad0375dfe72f8e1076e38,42a57298-6050-431a-91e1-ebb871f9101a
+::#,26200,vol,zh-cn,5278060245,84ba98d48b786be8495dcd548f0a29283300dd29f7637cf981efed42ddd7b3b7,d39cadcd-7f29-43d1-babc-6460e78ef978
+::#,26200,vol,zh-tw,5228085016,f2c63fb53c40c5a3b58ef802078caac2ef0be10100f634e4a20bb32168b1fb6c,6a35134d-8724-47c8-9ed4-4b09ca06bdbc
+::#,26300,chn,zh-cn,6062201548,ead38a1541411ee0a185d012f24836ab0d651689f803395eb37626cd52727e11,2752553b-abca-4e7e-8810-42593139dcfe
+::#,26300,ret,ar-sa,6071633140,1f08eea99fcfc3ee4babac802c5301320b7fdb1ecf9f58b3b2a773a30b3f17bf,8fb390a7-d66b-49f2-b7b0-09a67a604546
+::#,26300,ret,bg-bg,6118315172,ef8543c913b4d4e2ae59ba0a618319685013635c116a861f8fc66badbaaf89ea,bf364a2a-3188-45e9-aa8b-d30bd106f680
+::#,26300,ret,cs-cz,6091099862,7b271b1d802be02d043b71060771c8088f58bf4ab90b2fcfa459674cb04c0bc9,0db02757-8141-4b7d-a3dc-20239f5b987e
+::#,26300,ret,da-dk,6101512744,28e8928e72edf54550d3e325fce68d7714188eb6b50967907efe9e0833b05fc4,1889295f-d9fe-48d8-86e8-272ae126a721
+::#,26300,ret,de-de,6235436886,162da2203b1c9d9bb670d4d75d99f32eca93958d5c934d95c112787939c51d47,fdb38978-c298-4962-9ff8-048c9e28d82f
+::#,26300,ret,el-gr,6106155980,1ed41440e033d692b14986215ba2ec96fe3f19df6a494d7f86945787fc6ee241,b22deccc-2b2a-4783-a413-bbc7c868808b
+::#,26300,ret,en-gb,6237917797,6c5d2f9a2916b3c580bf0f7b510535abfa3f192bdf638910661e343c3c9dd226,2a0e5ba9-88b3-4255-b89c-6aab9dfdc7d0
+::#,26300,ret,en-us,6205178813,f70f55d199fcfde2b19303254bd6853d04c089e5c2aa2907de3e3a44001c1300,3d9e62bb-e92f-443e-94da-fc4e03021048
+::#,26300,ret,es-es,6235414983,a58703a2eb212b321b4dce172c59e387ba85baed09fbe6d881d8432126b71628,dd059ae3-b982-474a-8dc3-18faf48973c6
+::#,26300,ret,es-mx,6069689409,e9b65697a88c2408af7859db297bc42fb8323d00feb82af63d3f134d7c58db2e,59972ed8-3132-4587-bc99-de821a69a2d7
+::#,26300,ret,et-ee,6067663413,118f81df83b75e56cadc4c7443b2e6398b9a165043f9971476b4ee6a7709765e,fba20cef-9f91-4952-a398-2da018af7d0f
+::#,26300,ret,fi-fi,6073940161,ed53178ef33231978cefbdc29b3d9eefd9762f1d4abebafe17119fac6bed8fc8,be68dda9-9379-49d8-8054-95ab1765d786
+::#,26300,ret,fr-ca,6053246934,dcb9b4dd6de1d699866946dd9e028792e60a871f495e4b1b5de9e8f8735c060a,d12872be-7fe6-4d3e-b46a-f510dd0009e9
+::#,26300,ret,fr-fr,6229880416,9862006ab253ae33f2806ce04d340ff827cd3ab879cd30d045e6efb2780aa27f,41cea7ea-2082-4990-b34b-84b268c43ebb
+::#,26300,ret,he-il,6034834479,ac9e5f3793f1b3177dab72fb58adc7def3799cc795083b3da18904f9f7673bd8,f78e975f-de91-4a73-85ef-5dbaa9efbbe6
+::#,26300,ret,hr-hr,6107859963,e4fbe1174919335766f55e5d26cfc6fc4f6417fa10a3671e6c0d9df47544ed2d,f336833f-553e-444b-847b-c104e82f7594
+::#,26300,ret,hu-hu,6090814946,1fdea1bda53eee405dbd32e911264d2b444277200c6e7b2c608dba5dbc1814c4,b80f7766-56c8-4741-b765-431dace04d80
+::#,26300,ret,it-it,6112027375,d5027d0b71e9a08f09bc8ca87b3dbc466c3658a19b2a62b1d81a7fd2e47f1614,20ba022f-8901-45ba-a61a-1449bc3840ca
+::#,26300,ret,ja-jp,6184727431,7867d5cb8c2b236ed9f75b245f69234d90d7e6245c24ea21eb12000f52f7f075,287f3ad6-2d4f-4dc3-8240-4d705e57ec22
+::#,26300,ret,ko-kr,6042869216,8ad8b47100725744d541c10f76cdc78a054d0f5eb2ecf60ad99d015c17da60d4,a1e7a893-29cf-4dfb-98c8-bbb126b4a9ec
+::#,26300,ret,lt-lt,6081366688,ce0e3a9756f9db708ea30cccf379fc34a186d180d78d47383e8d02d70693f0bf,0893d2ef-1002-4569-bb45-0a84eb4b163f
+::#,26300,ret,lv-lv,6079433401,c8d0959def757aaabb28e798c939196d575ac1f0f52e68ce352cd26922ca047c,79249977-0fa0-45d2-8d3a-d0edc1c43e09
+::#,26300,ret,nb-no,6084935942,0026fac3c6186f7317c4ab4c745cbf2a0372399bb30343db2828ec0938b04d58,1eb61e0a-b3ae-494a-a489-263ad51f7746
+::#,26300,ret,nl-nl,6065681272,e04db820563e36c7752a456ebe71c3f418f0937b9921f311f091ca73251fe5ec,0d1e1c8c-f601-4154-bbe0-31cb248c3817
+::#,26300,ret,pl-pl,6089799986,1a3f81161b90c52bc75d677f329df3387acf60770e2398de3657e8400fe199bc,e6bbcc03-da66-4c0c-be49-58b86779e9e5
+::#,26300,ret,pt-br,6060819890,5f96261f69fe2956697ac7b451779f375b04706ddeb52064fde74162861b03ff,7eb2b859-0df8-48b2-a189-f9f902c9800f
+::#,26300,ret,pt-pt,6139341051,821840391706e035d1237ace346b70f4c605bb84cb02b880da628a70f1611a67,530e2337-ac15-43e7-abab-bb9d18cdc96b
+::#,26300,ret,ro-ro,6093944347,638a2754215a38843f9e865e11cc64fda0584d0ef1bb2b44d6d10dca5569d9ea,23672601-ee38-4d6f-80b7-c0e154f33067
+::#,26300,ret,ru-ru,6053364230,8ece869054e5d64cd5f9845facfc898109925123e51fbf31623e54328ce82604,97efbf56-2608-43f7-b580-375512b2f3c8
+::#,26300,ret,sk-sk,6082972650,47f4b5f2e1759bd4838a1570e0077b172b8d6ed5feb09c66feaf9492de25b58b,ba89b699-b4c7-4cb3-a3f3-f3571e762747
+::#,26300,ret,sl-si,6072395827,840acadf14436ff0677307ad405f94482b3892ff874345016a8a4670228b8739,74520858-11ff-4d24-9770-b6a3357b1131
+::#,26300,ret,sr-latn-rs,6012889197,fb8a3413fc5545c3c038c813333777cf8e21cb767775be2a13cf230835fbc0ed,02cc7028-2a14-47b0-8400-00b5d0c49147
+::#,26300,ret,sv-se,6069671873,242fc9ef4daadbf95f93f51168be60de43bb7275725b1865a0360840041a12dd,23b9b42a-1e3b-46ce-9dba-3b761aa3877b
+::#,26300,ret,th-th,5988105782,76f55b656795f2a386f374912240401a460744b9fd412852dd348d4b93d6aa4d,5ae9e793-703c-4b87-84c4-347b3fabbcc1
+::#,26300,ret,tr-tr,6009211771,556fddcee6fcf6fe39299ad59107f00eeaf0bf54bbaca8e50da88d8846bfb4de,5de364e5-a006-4676-a812-f117fcdb2bbf
+::#,26300,ret,uk-ua,6009141131,084f434fbd907e2d080231834d731c8a112244926b459d13925fab62714fb70f,59508ec9-b89a-4c11-b05b-244754667da4
+::#,26300,ret,zh-cn,6326574815,26e7bcc67165a11972825b93e09f1aefad0c70ba26ba5f81ed2034d80df84beb,79f6dea5-67d3-4861-94ab-0aaa9d006847
+::#,26300,ret,zh-tw,6239696673,b5e25b0d3e54af5a12e153fe5f8263ad4cfb30414dd4c06c278941ba8cad9ed0,97e43bc0-8ee0-4b36-8360-e8ef61fab40e
+::#,26300,vol,ar-sa,5948163482,3b169b331f2b0ef79874ec2482dca0b456ac9a62f8461478f4eecef21c1eaee6,d7c1098e-e6d6-4a6f-92d3-3c5251adf1db
+::#,26300,vol,bg-bg,6020438520,b7b061265802c166f80edc83630c5fa631cfbbe289749c4491deafc621f80a53,4d3a6199-66ab-4020-a78c-2b312ce06e54
+::#,26300,vol,cs-cz,6041070424,453de6597f100fccccf601330614fedee350f5f76201948d55692ee5b4f670dc,f3ac9a7e-fb92-4bdf-a0ac-abc69a0e9210
+::#,26300,vol,da-dk,6086090987,718db12f3b075915b480cfa468b42a340bd9508a141c763ca8a201147a6d7b27,f9b25b24-c2cd-4dde-b52c-9451a488e4f7
+::#,26300,vol,de-de,6144512312,887d64e1fdb5bd5381f14952559374fcc00017582294dda51a038b6d4b3a7a33,38cd763d-eb0d-4ca3-9c20-5c0f253e98d3
+::#,26300,vol,el-gr,6047846356,c5465a2dafba6fbe1bcddfa852ea8cd748620ea8414b6486f37ef7aadd6e3a97,9078936b-1e14-4d47-a96d-85010036cf1b
+::#,26300,vol,en-gb,6114853565,8393b65e69a5d9c9f3fd375099e5d27a7a6cc3f7abccdd5d63d05239b4176db0,b1d8a52b-5db0-4f06-b65a-47173d44c9ad
+::#,26300,vol,en-us,6136072264,dbd441074d885e25393aac83343242aef6c9b1d05fdd6b4fa35cbf24f3f09ef0,0bd72656-60d4-4cdf-ac48-e1f50fbcfe62
+::#,26300,vol,es-es,6144304673,c088632593dea3be89ddfe07b7f30e552ca7d55b17b63cdf6b511810a3e19932,85ee33fc-2bc3-4387-bdfd-a04ecb85c143
+::#,26300,vol,es-mx,5950698849,730ad4cf76d42803c9358ec70582cb59ff71c69cfde06f6e84356af85656cfb8,8972153a-b869-4510-b7a2-8c54348c8bd6
+::#,26300,vol,et-ee,5999337634,82494fc8650e1345b3cef173bcb5b23b3f997e65e6cee858712ba0a1ab2f6787,fc020fc2-dc14-4dbc-9554-63892b0855e4
+::#,26300,vol,fi-fi,6043526771,6feb998c80ce6211c1f7a93bd0cdb9ad8f9919b2ab6d6f59ad3cfeba7f21e393,7b102e91-b782-4de1-9e56-2d25f6bdcbb8
+::#,26300,vol,fr-ca,6021252609,ba6627864a6508c7e3a1e1dd351d8c54ef9e3bc901007c789e75b441809dd740,a3424a9c-f809-4ffc-b83b-51c1ebaff5ca
+::#,26300,vol,fr-fr,6114803065,9b09fb01dad535ef547b1de2dc796b68b9bbf53384d3eae0c36c82376547b356,255d0833-99e1-4398-9085-a5727d338965
+::#,26300,vol,he-il,6002806239,5ca20324ed198aeeb0fc38976b7e0db15a7b03dadcbf8355ff1d34fbc5eeee38,0be66f8d-489d-4dd8-91a9-cc99ba61e9a0
+::#,26300,vol,hr-hr,5981519909,4ea25b078bd913586412ee01b3f314f2a39fee6eb3c19312f939129565546de9,025d4fce-a96c-4fcf-b318-71d7b0d69ca4
+::#,26300,vol,hu-hu,6050264670,7d92aba4ad663c728bb4c67515a3f3a0b6577bcd89aa8a2986b305f560a34217,0962e425-18b6-4a6a-b88b-bab40c4481a5
+::#,26300,vol,it-it,6061033340,e97fe893c0f5eff89894326067903cbba0e7ad5bc85fa73c4cace6d940f5b9d4,393999bf-92b8-4c25-8cb4-ad6f96e2782b
+::#,26300,vol,ja-jp,6150791435,d1e77e52ee78c4585b0e1154f03e4efaa8899ef21910882919674acee1706926,82dcc8e3-859d-4783-a14a-6c8bb63c5cc4
+::#,26300,vol,ko-kr,6006077251,62ad9e2813556c9eed818a4c35e84e0ad601dcf68a04e16e8dd934d7443c48e7,6aa2898a-b40d-4144-b9bf-cf83096413f3
+::#,26300,vol,lt-lt,6012172885,88e276c35a5bdd515a4f37b1d1ed757a4cd7ed06fe25247af184f0adc5d45073,ced93729-c63d-426c-9936-bec3c71126e5
+::#,26300,vol,lv-lv,5985219670,a0d8b1bfed97cdf46ace45559d39a9c723a1518507dcb9b4861cba1d1735065a,d730f4ba-f21d-43ef-bd86-470c2cb1f14b
+::#,26300,vol,nb-no,6050569342,f02598248794399a6bd6ee268b91392cce0f97b6bead1615068ab9f3cf447c13,64695aa4-7954-48f9-9c06-8b9be4640f30
+::#,26300,vol,nl-nl,6053029495,2850061a979375439d516c0c8c539458892629663cf157462fe82089903d13f0,1e36af0f-a72a-4ae6-ae7e-14f59804dd32
+::#,26300,vol,pl-pl,6076775189,e0b30e250d33d9da59887fe96bd6b8d51378e02e5de9072c5bedd57fafca662d,4e262387-ef51-4f95-ab56-72158a93bce4
+::#,26300,vol,pt-br,5974427497,4310c40ab765863cae1b3772cbf0405253e6f695bc41402b53bce92140a861d2,95832adc-4b0c-4a93-a8e3-6db29b2ce141
+::#,26300,vol,pt-pt,6067534995,0842ac518e71a8a0a4c0c210c54dd60c7f7dd160499a103e903fd72c09c13940,4d1a818f-bff2-484c-807c-9baf240a512f
+::#,26300,vol,ro-ro,6013001103,63ea21211f0d94b9279b765c0a4f372d30a650aeba0c0b889361a4041b85364e,7eb96bee-6a05-46d0-91e9-566840c561c5
+::#,26300,vol,ru-ru,5955693593,52b79916e184bceccc22c4f0a78a31285f85d47bbe7b69521c62e5f2315372e2,f69cb7fc-7bb7-41a6-9759-d229af03b76a
+::#,26300,vol,sk-sk,6013546360,9efb861ceb78d85318812e98bd8c433ebf655091581f76c9b9700a8d86c33d4f,9448386a-612b-4def-9bd5-4c2814112dbe
+::#,26300,vol,sl-si,5996807220,da943dbf3135d0621f9f14b4259c06b82257a39b8aab90f56a265810d6955236,108378df-5bf1-4ed8-aece-ed6850da246b
+::#,26300,vol,sr-latn-rs,5873627638,356c05d31af7a7719da021284b1f832cddac8fcf116f45d98b09881b1e2d3411,458625ce-ffbf-4a87-b352-637da85bbd93
+::#,26300,vol,sv-se,6038552514,e046b7e2cd0ec9259d04cc4a8496f80c87485780ace4cfa954a1733b3a264767,352284a2-8cf8-4a11-8cc9-1b9354dddf63
+::#,26300,vol,th-th,5938675573,94f4ebe6e279b4dc9d8c0115e98c82d2b3a7febd2a0039382a1f9381f8d08136,766c8cef-9cb3-46af-81dc-51afe00ad9f5
+::#,26300,vol,tr-tr,5943565199,03fdb0cc1f1b1574ac9b2bbaaa0c786e2b2836a581c8a6233f2a1ae185674c73,1a1bb692-e9b5-45b2-8694-363f43ffb5f6
+::#,26300,vol,uk-ua,5909718238,e9999199b2be2d133b5e0e0cab3f6c6dbf16f26bf3c89ea28662f9046a039c74,9b1ecf95-c4eb-4d9f-9c49-8e2182267725
+::#,26300,vol,zh-cn,6192772929,53372b9699debba43628c0153f5aa62e5504f16865f07d22d5d0e233e202438c,9b473268-ae5f-44a2-86d9-586af4c7bce4
+::#,26300,vol,zh-tw,6179565753,1f8ced68821a4a6775cb1a6625f3e47694ccdaf5fe3b61406aadc7a957d27385,d7ecee32-7822-4859-acfc-bd070b93e771
