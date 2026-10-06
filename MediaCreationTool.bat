@@ -138,8 +138,8 @@ echo;
 %<%:17 "can rename script: "%>>% & %<%:1f "def MediaCreationTool.bat"%>>% & %<%:17 " to always create unmodified MCT media "%>%
 
 ::# show more responsive MCT + PRE pseudo-menu dialog or separate choice dialog instances if either MCT or PRE are set
-if "%MCT%%PRE%"=="" call :choices2 MCT "%VERSIONS%" %dV% "MCT Version" PRE "%PRESETS%" %dP% "MCT Preset" 11 white 0x005a9e 320
-if %MCT%0 lss 1 if %PRE%0 gtr 1 call :choices MCT "%VERSIONS%" %dV% "MCT Version" 11 white 0x005a9e 320
+if "%MCT%%PRE%"=="" call :choices2 MCT "%VERSIONS%" %dV% "MCT Version" PRE "%PRESETS%" %dP% "MCT Preset" 10 white 0x005a9e 320
+if %MCT%0 lss 1 if %PRE%0 gtr 1 call :choices MCT "%VERSIONS%" %dV% "MCT Version" 10 white 0x005a9e 320
 if %MCT%0 gtr 1 if %PRE%0 lss 1 call :choices PRE "%PRESETS%"  %dP% "MCT Preset"  11 white 0x005a9e 320
 if %MCT%0 gtr 1 if %PRE%0 lss 1 goto choice-0 = cancel
 goto choice-%MCT%
@@ -398,8 +398,9 @@ echo;
 ::# download MCT and CAB / XML - new snippet to try via bits, net, certutil, and insecure/secure
 ::# a products%VID%.xml or products%VID%.cab placed next to the script is used instead of the download - for any version
 for %%s in (xml.cab cab.xml) do if exist "%ROOT%\products%VID%.%%~ns" copy /y "%ROOT%\products%VID%.%%~ns" products%VID%.%%~ns >nul 2>nul && del /f /q products%VID%%%~xs >nul 2>nul
-for %%s in (xml cab) do if exist "%ROOT%\products%VID%.%%s" echo;%ROOT%\products%VID%.%%s
+for %%s in (xml cab) do if exist "%ROOT%\products%VID%.%%s" for %%f in ("%ROOT%\products%VID%.%%s") do echo;%%~f
 if defined XML if not exist "%ROOT%\products%VID%.cab" del /f /q products%VID%.cab >nul 2>nul
+if defined CAB if exist "%ROOT%\products%VID%.xml" set CAB=&rem ::# a local xml override also replaces the cab download
 if defined EXE echo;%EXE% & call :DOWNLOAD "%EXE%" MediaCreationTool%VID%.exe
 if defined XML echo;%XML% & call :DOWNLOAD "%XML%" products%VID%.xml
 if defined CAB echo;%CAB% & call :DOWNLOAD "%CAB%" products%VID%.cab
@@ -416,7 +417,7 @@ call :PRODUCTS_XML
 
 ::# refuse to build the wrong media if the configured catalog does not list the requested build (stale cache / missing esd links)
 if %VER% geq 26100 findstr /m /l /c:"%VER%." products.xml >nul 2>nul || set err=1
-if defined err (%<%:4f " ERROR "%>>% & %<%:0f " products.xml does not list build %VER% - delete %WORK%\MCT dir and retry "%>%)
+if defined err (%<%:4f " ERROR "%>>% & %<%:0f " products.xml lacks build %VER% - delete C:ESD MCT dir and any products%VID% file next to the script, then retry "%>%)
 if defined err (del /f /q products%VID%.* MediaCreationTool%VID%.exe 2>nul & pause & exit /b1)
 
 ::# repack XML into CAB
@@ -669,7 +670,8 @@ EXIT
      reg.exe load $K $hive >$null 2>&1
      if ($LASTEXITCODE -eq 0) {
        foreach ($c in 'CPU','RAM','SecureBoot','Storage','TPM') {reg.exe add "$K\Setup\LabConfig" /f /v "Bypass${c}Check" /d 1 /t reg_dword >$null 2>&1}
-       [GC]::Collect(); reg.exe unload $K >$null 2>&1; write-host -fore Gray "LabConfig", "boot.wim"
+       [GC]::Collect(); reg.exe unload $K >$null 2>&1; if ($LASTEXITCODE -ne 0) {sleep 2; reg.exe unload $K >$null 2>&1}
+       write-host -fore Gray "LabConfig", "boot.wim"
      }
    }
    try { takeown.exe /f $winsetup /a >$null; icacls.exe $winsetup /grant *S-1-5-32-544:f; attrib -R -S $winsetup
