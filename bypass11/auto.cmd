@@ -98,7 +98,15 @@ if "%Build%" lss "22000" set /a SKIP_11_SETUP_CHECKS=0
 reg add HKLM\SYSTEM\Setup\MoSetup /f /v AllowUpgradesWithUnsupportedTPMorCPU /d 1 /t reg_dword >nul 2>nul &rem ::# TPM 1.2+ only
 if "%SKIP_11_SETUP_CHECKS%" equ "1" cd.>appraiserres.dll 2>nul & rem ::# writable media only
 for %%A in (appraiserres.dll) do if %%~zA gtr 0 (set TRICK=/Product Server ) else (set TRICK=)
+if "%Build%" geq "26100" (set TRICK=) &rem ::# /Product Server trick is ignored by setup since 24H2
 if "%SKIP_11_SETUP_CHECKS%" equ "1" (set OPTIONS=%TRICK%%OPTIONS%)
+
+::# skip windows 11 24H2+ upgrade checks: setup uses hwreqchk now and ignores the tricks above - spoof its variables instead
+set "ACF=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags"
+if "%SKIP_11_SETUP_CHECKS%" equ "1" if "%Build%" geq "26100" (
+ for %%k in (CompatMarkers Shared TargetVersionUpgradeExperienceIndicators) do reg delete "%ACF%\%%k" /f
+ reg add "%ACF%\HwReqChk" /f /v HwReqChkVars /t REG_MULTI_SZ /s , /d "SQ_SecureBootCapable=TRUE,SQ_SecureBootEnabled=TRUE,SQ_TpmVersion=2,SQ_RamMB=8192,"
+) >nul 2>nul
 
 ::# auto upgrade with edition lie workaround to keep files and apps - all 1904x builds allow up/downgrade between them
 if defined reg call :rename %reg%

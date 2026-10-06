@@ -21,6 +21,10 @@ To NOT add bypass to the media, use ***MCT Defaults*** preset or rename the scri
 > upgrade is now handled ~~only~~ via `auto.cmd` with the */Product Server* trick  
 > *Just ignore the 'Windows Server' label, please!*  
 > NEWS: temporarily added back my old-style 0-byte bypass as it still works on release  
+> 24H2 and newer: setup checks moved to _hwreqchk_ and ignore the tricks above, so `auto.cmd` now spoofs the  
+> hwreqchk registry variables for upgrades and the script adds _LabConfig_ keys into _boot.wim_ for clean installs  
+> _POPCNT / SSE4.2 capable CPU is a hard requirement of the 24H2+ kernel and cannot be bypassed_  
+> _Skip_TPM_Check_on_Dynamic_Update.cmd (V13) was written for 23H2 and has not been reworked for 24H2+ Windows Update upgrades_  
 
 i: [Skip_TPM_Check_on_Dynamic_Update.cmd](Skip_TPM_Check_on_Dynamic_Update.cmd) acts globally and **skips setup.exe upgrade checks as well**  
 _regardless of mounted iso / usb media already having a bypass added or not_  

@@ -1,14 +1,14 @@
 @goto latest at github.com/AveYo/MediaCreationTool.bat
-:Universal MCT wrapper script for all Windows 10/11 versions from 1507 to 23H2!
+:Universal MCT wrapper script for all Windows 10/11 versions from 1507 to 26H2!
 :: Nothing but Microsoft-hosted source links and no third-party tools; script just configures an xml and starts MCT
 :: Ingenious support for business editions (Enterprise / VL) selecting language, x86, x64 or AiO inside the MCT GUI
-:: Changelog: 2023.11.29 stable
-:: - all issues ironed out; upgrade keeping files from Eval editions too; pickup $ISO$ dir content to add on media
-:: - DU in 11: auto installs 22000.556 atm; older skip_11_checks, without Server label; Home offline local account
-:: on upgrade: latest build, on offline install: 11 23H2 22631.2861 / 11 22H2 22621.1702 / 11 21H2 22000.318 / 22H2 19045.2965 / 21H2 19044.1288 / 21H1 19043.1348 / 20H2 19042.1052
+:: Changelog: 2026.10.06 windows 11 24H2 / 25H2 / 26H2 - see readme for details
+:: - 25H2+ MCT gets its catalog from the update service, so products11_25H2.xml / products11_26H2.xml ship with the script
+:: - 24H2+ setup checks: hwreqchk registry vars via auto.cmd on upgrade, LabConfig keys added to boot.wim on clean install
+:: on upgrade: latest build, on offline install: 11 26H2 26300.9457 / 11 25H2 26200.6899 / 11 24H2 26100.4349 / 11 23H2 22631.2861 / 11 22H2 22621.1702 / 11 21H2 22000.318 / 22H2 19045.2965 / 21H2 19044.1288 / 21H1 19043.1348 / 20H2 19042.1052
 
-::# uncomment to skip GUI dialog for MCT choice: 1507 to 11 23H2 - or rename script: "23H2 MediaCreationTool.bat"
-rem set MCT=2310
+::# uncomment to skip GUI dialog for MCT choice: 1507 to 11 26H2 - or rename script: "26H2 MediaCreationTool.bat"
+rem set MCT=26H2
 
 ::# uncomment to start auto upgrade setup directly (no prompts) - or rename script: "auto 11 MediaCreationTool.bat"
 rem set /a AUTO=1
@@ -47,9 +47,9 @@ set /a UNHIDE_BUSINESS=1
 ::# comment to not insert Enterprise esd links for 1607,1703 or update links for 1909,2004,20H2,21H2,22H2,11_21H2,11_22H2,11_23H2 in products.xml
 set /a INSERT_BUSINESS=1
 
-::# MCT Version choice dialog items and default-index [11_23H2]
-set VERSIONS=1507,1511,1607,1703,1709,1803,1809,1903,1909,20H1,20H2,21H1,21H2,22H2,11_21H2,11_22H2,11_23H2
-set /a dV=17
+::# MCT Version choice dialog items and default-index [11_26H2]
+set VERSIONS=1507,1511,1607,1703,1709,1803,1809,1903,1909,20H1,20H2,21H1,21H2,22H2,11_21H2,11_22H2,11_23H2,11_24H2,11_25H2,11_26H2
+set /a dV=20
 
 ::# MCT Preset choice dialog items and default-index [Select in MCT]
 set PRESETS=^&Auto Upgrade,Auto ^&ISO,Auto ^&USB,^&Select,MCT ^&Defaults
@@ -64,9 +64,10 @@ call :reg_query "HKU\S-1-5-18\Control Panel\Desktop\MuiCached" "MachinePreferred
 for %%s in (%OS_LANGCODE%) do set "OS_LANGCODE=%%s"
 set "OS_ARCH=x64" & if "%PROCESSOR_ARCHITECTURE:~-2%" equ "86" if not defined PROCESSOR_ARCHITEW6432 set "OS_ARCH=x86"
 
-::# parse MCT choice from script name or commandline - accepts both formats: 1909 or 19H2 etc.
+::# parse MCT choice from script name or commandline - accepts both formats: 1909 or 19H2 etc. and 11_24H2 or 24H2 or 2410
 for %%V in (1.1507 2.1511 3.1607 4.1703 5.1709 6.1803 7.1809 8.1903 8.19H1 9.1909 9.19H2 10.2004 10.20H1 11.2009 11.20H2 12.2104
- 12.21H1 13.2109 13.21H2 14.2210 14.22H2 15.2110 15.11_21H2 16.2209 16.11_22H2 17.2310 17.11_23H2) do for %%s in (%MCT% %~n0 %*) do if /i %%~xV equ .%%~s set "MCT=%%~nV" & set "VID=%%~s"
+ 12.21H1 13.2109 13.21H2 14.2210 14.22H2 15.2110 15.11_21H2 16.2209 16.11_22H2 17.2310 17.11_23H2 18.2410 18.24H2 18.11_24H2
+ 19.2509 19.2510 19.25H2 19.11_25H2 20.2609 20.2610 20.26H2 20.11_26H2) do for %%s in (%MCT% %~n0 %*) do if /i %%~xV equ .%%~s set "MCT=%%~nV" & set "VID=%%~s"
 if defined MCT if not defined VID set "MCT="
 
 ::# parse AUTO from script name or commandline - starts unattended upgrade / in-place repair / cross-edition
@@ -119,8 +120,9 @@ if not defined VID (set VID=%OS_VID%)
 (set MEDIA_EDITION=%MEDIA_EDITION:IoTEnterprise=Enterprise%)
 (set MEDIA_EDITION=%MEDIA_EDITION:IoTEnterpriseS=Enterprise%)
 
-::# get previous GUI selection if self elevated and skip to choice
-for %%s in (%*) do for %%P in (1 2 3 4) do if %%~ns gtr 0 if %%~ns lss 15 if %%~xs. equ .%%P. set /a PRE=%%P & set /a MCT=%%~ns
+::# get previous GUI selection if self elevated and skip to choice - accept any index up to the number of VERSIONS entries
+set /a nV=0 & for %%s in (%VERSIONS%) do set /a nV+=1
+for %%s in (%*) do for %%P in (1 2 3 4) do if %%~ns gtr 0 if %%~ns leq %nV% if %%~xs. equ .%%P. set /a PRE=%%P & set /a MCT=%%~ns
 
 ::# write auto media preset hint
 %<%:f0 " Detected Media "%>>% & if defined MCT %<%:5f " %VID% "%>>%
@@ -141,6 +143,24 @@ if %MCT%0 lss 1 if %PRE%0 gtr 1 call :choices MCT "%VERSIONS%" %dV% "MCT Version
 if %MCT%0 gtr 1 if %PRE%0 lss 1 call :choices PRE "%PRESETS%"  %dP% "MCT Preset"  11 white 0x005a9e 320
 if %MCT%0 gtr 1 if %PRE%0 lss 1 goto choice-0 = cancel
 goto choice-%MCT%
+
+:choice-20
+set "VER=26300" & set "VID=11_26H2" & set "CB=26300.9457.260913-1737.26h2_ge_release_svc_refresh" & set "CT=2026/09/" & set "CC=2.1"
+set "XML=https://raw.githubusercontent.com/travisling21/MediaCreationTool.bat/main/products11_26H2.xml"
+set "EXE=https://download.microsoft.com/download/0a8b07d9-a3bf-47b9-b71b-8e13354cec88/MediaCreationTool.exe"
+goto process ::# windows 11 26H2 - no static products.cab from microsoft since 25H2, catalog captured from MCT 26100.7019 ships with script
+
+:choice-19
+set "VER=26200" & set "VID=11_25H2" & set "CB=26200.6899.251011-1532.25h2_ge_release_svc_refresh" & set "CT=2025/10/" & set "CC=2.1"
+set "XML=https://raw.githubusercontent.com/travisling21/MediaCreationTool.bat/main/products11_25H2.xml"
+set "EXE=https://download.microsoft.com/download/0a8b07d9-a3bf-47b9-b71b-8e13354cec88/MediaCreationTool.exe"
+goto process ::# windows 11 25H2 - enablement package on the 24H2 base, catalog captured from MCT ships with script, all esd links on microsoft servers
+
+:choice-18
+set "VER=26100" & set "VID=11_24H2" & set "CB=26100.4349.250607-1500.ge_release_svc_refresh" & set "CT=2025/06/" & set "CC=2.0"
+set "CAB=https://download.microsoft.com/download/8e0c23e7-ddc2-45c4-b7e1-85a808b408ee/Products-Win11-24H2-6B.cab"
+set "EXE=https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/mediacreationtool.exe"
+goto process ::# windows 11 24H2 - new platform base that requires a POPCNT / SSE4.2 capable cpu; last static products.cab from microsoft
 
 :choice-17
 set "VER=22631" & set "VID=11_23H2" & set "CB=22631.2861.231204-0538.23H2_ni_release_svc_refresh" & set "CT=2023/12/" & set "CC=2.0"
@@ -163,7 +183,7 @@ goto process ::# windows 11 : usability and ui downgrade, and even more ChrEdge 
 :choice-14
 set "VER=19045" & set "VID=22H2" & set "CB=19045.2965.230505-1139.22h2_release_svc_refresh" & set "CT=2023/05/" & set "CC=1.4.1"
 set "CAB=https://download.microsoft.com/download/3/c/9/3c959fca-d288-46aa-b578-2a6c6c33137a/products_win10_20230510.cab.cab"
-set "EXE=https://download.microsoft.com/download/9/e/a/9eac306f-d134-4609-9c58-35d1638c2363/MediaCreationTool22H2.exe"
+set "EXE=https://download.microsoft.com/download/9/e/a/9eac306f-d134-4609-9c58-35d1638c2363/MediaCreationTool_22H2.exe"
 goto process ::# refreshed 19041 base with integrated 22H2 enablement package - current
 
 :choice-13
@@ -315,7 +335,8 @@ fltmc>nul||(set A=/d /x /c set "ROOT=%ROOT%"^& start "MCT" "%~f0" %* %set%& powe
 mkdir "%WORK%\MCT" >nul 2>nul & attrib -R -S -H "%WORK%" /D & pushd "%WORK%\MCT"
 del /f /q products.* *.key EI.cfg PID.txt auto.cmd AutoUnattend.xml >nul 2>nul
 set /a latest=0 & if exist latest set /p latest=<latest
-echo;20231129>latest & if %latest% lss 20211116 del /f /q products*.* MediaCreationTool*.exe >nul 2>nul
+echo;20261006>latest & if %latest% lss 20211116 del /f /q products*.* MediaCreationTool*.exe >nul 2>nul
+if %latest% lss 20261006 del /f /q products11_25H2.* products11_26H2.* MediaCreationTool11_25H2.exe MediaCreationTool11_26H2.exe >nul 2>nul
 
 ::# edition fallback to ones that MCT supports - after selection
 (set MEDIA_EDITION=%MEDIA_EDITION:Eval=%)
@@ -362,6 +383,9 @@ if %VER% geq 22000 (set MEDIA_ARCH=x64& if defined ARCH set ARCH=x64)
 if %VER% geq 22000 (set X=11& set VIS=21H2) else (set X=10& set VIS=%VID%)
 if %VER% geq 22621 (set X=11& set VIS=22H2)
 if %VER% geq 22631 (set X=11& set VIS=23H2)
+if %VER% geq 26100 (set X=11& set VIS=24H2)
+if %VER% geq 26200 (set X=11& set VIS=25H2)
+if %VER% geq 26300 (set X=11& set VIS=26H2)
 
 ::# refresh screen
 cls & <"%~f0" (set /p _=&for /l %%s in (1,1,20) do set _=& set/p _=& call echo;%%_%%)
@@ -372,6 +396,10 @@ if %PRE% leq 3 %<%:6f " %MEDIA_LANGCODE% "%>>%  &  %<%:9f " %MEDIA_CFG% "%>>%  &
 echo;
 
 ::# download MCT and CAB / XML - new snippet to try via bits, net, certutil, and insecure/secure
+::# a products%VID%.xml or products%VID%.cab next to the script is used instead of the download (25H2+ catalogs ship with the script)
+for %%s in (xml.cab cab.xml) do if exist "%ROOT%\products%VID%.%%~ns" copy /y "%ROOT%\products%VID%.%%~ns" products%VID%.%%~ns >nul 2>nul && del /f /q products%VID%%%~xs >nul 2>nul
+for %%s in (xml cab) do if exist "%ROOT%\products%VID%.%%s" echo;%ROOT%\products%VID%.%%s
+if defined XML if not exist "%ROOT%\products%VID%.cab" del /f /q products%VID%.cab >nul 2>nul
 if defined EXE echo;%EXE% & call :DOWNLOAD "%EXE%" MediaCreationTool%VID%.exe
 if defined XML echo;%XML% & call :DOWNLOAD "%XML%" products%VID%.xml
 if defined CAB echo;%CAB% & call :DOWNLOAD "%CAB%" products%VID%.cab
@@ -380,6 +408,8 @@ if exist products%VID%.cab del /f /q products%VID%.xml >nul 2>nul
 if exist products%VID%.cab expand.exe -R products%VID%.cab -F:* . >nul 2>nul
 set "/hint=Check urls in browser | del ESD dir | use powershell v3.0+ | unblock powershell | enable BITS serv"
 echo;& set err=& for %%s in (products.xml MediaCreationTool%VID%.exe) do if not exist %%s set err=1
+::# refuse to build the wrong media if the catalog does not list the requested build (stale cache or wrong products file)
+if not defined err if %VER% geq 26100 findstr /m /l /c:"%VER%." products.xml >nul 2>nul || (set err=1& set "/hint=products.xml does not list build %VER% - delete %WORK%\MCT or put a valid products%VID%.xml next to the script")
 if defined err (%<%:4f " ERROR "%>>% & %<%:0f " %/hint% "%>%) else if not defined err %<%:0f " %PRESET% "%>%
 if defined err (del /f /q products%VID%.* MediaCreationTool%VID%.exe 2>nul & pause & exit /b1)
 
@@ -630,6 +660,15 @@ EXIT
      $f5 = "$env:WORK\MCT\AutoUnattend.xml" 
      if (test-path $f5) {write-host importing file: $f5; copy -path $f5 -dest "$WD\MOUNT" -force >$null}
    }
+  #:: 24H2+ clean install checks are enforced by hwreqchk, not just winsetup.dll - also add LabConfig bypass keys to boot.wim SYSTEM hive
+   $hive = "$WD\MOUNT\Windows\System32\config\SYSTEM"; $K = 'HKLM\MCT_BOOT'
+   if ([int]$env:VER -ge 26100 -and (test-path $hive)) {
+     reg.exe load $K $hive >$null 2>&1
+     if ($LASTEXITCODE -eq 0) {
+       foreach ($c in 'CPU','RAM','SecureBoot','Storage','TPM') {reg.exe add "$K\Setup\LabConfig" /f /v "Bypass${c}Check" /d 1 /t reg_dword >$null 2>&1}
+       [GC]::Collect(); reg.exe unload $K >$null 2>&1; write-host -fore Gray "LabConfig", "boot.wim"
+     }
+   }
    try { takeown.exe /f $winsetup /a >$null; icacls.exe $winsetup /grant *S-1-5-32-544:f; attrib -R -S $winsetup
      $patch = '/commit'; [io.file]::OpenWrite($winsetup).close() } catch {$patch = '/discard'}
    if ($patch -eq '/commit') { #:: an original setup override by AveYo to use when registry overrides fail (VirtualBox 5.x)
@@ -760,7 +799,15 @@ if "%Build%" lss "22000" set /a SKIP_11_SETUP_CHECKS=0
 reg add HKLM\SYSTEM\Setup\MoSetup /f /v AllowUpgradesWithUnsupportedTPMorCPU /d 1 /t reg_dword >nul 2>nul &rem ::# TPM 1.2+ only
 if "%SKIP_11_SETUP_CHECKS%" equ "1" cd.>appraiserres.dll 2>nul & rem ::# writable media only
 for %%A in (appraiserres.dll) do if %%~zA gtr 0 (set TRICK=/Product Server ) else (set TRICK=)
+if "%Build%" geq "26100" (set TRICK=) &rem ::# /Product Server trick is ignored by setup since 24H2
 if "%SKIP_11_SETUP_CHECKS%" equ "1" (set OPTIONS=%TRICK%%OPTIONS%)
+
+::# skip windows 11 24H2+ upgrade checks: setup uses hwreqchk now and ignores the tricks above - spoof its variables instead
+set "ACF=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags"
+if "%SKIP_11_SETUP_CHECKS%" equ "1" if "%Build%" geq "26100" (
+ for %%k in (CompatMarkers Shared TargetVersionUpgradeExperienceIndicators) do reg delete "%ACF%\%%k" /f
+ reg add "%ACF%\HwReqChk" /f /v HwReqChkVars /t REG_MULTI_SZ /s , /d "SQ_SecureBootCapable=TRUE,SQ_SecureBootEnabled=TRUE,SQ_TpmVersion=2,SQ_RamMB=8192,"
+) >nul 2>nul
 
 ::# auto upgrade with edition lie workaround to keep files and apps - all 1904x builds allow up/downgrade between them
 if defined reg call :rename %reg%
