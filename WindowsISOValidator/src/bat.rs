@@ -210,7 +210,7 @@ pub fn parse(text: &str) -> Result<Script> {
             note,
         });
     }
-    choices.sort_by(|a, b| b.index.cmp(&a.index));
+    choices.sort_by_key(|c| std::cmp::Reverse(c.index));
     if choices.is_empty() {
         return Err(anyhow!("no :choice- blocks found"));
     }

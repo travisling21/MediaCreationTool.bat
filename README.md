@@ -50,6 +50,14 @@ The single .bat stays self-contained and every ESD still comes straight from Mic
 > _- to refresh the links for a newer build: run the official MCT once, take `C:\$WINDOWS.~WS\Sources\Windows\sources\products.xml`_  
 > _and update the table at the end of the script (ver, client, lang, size, sha256, guid) plus the build label in the `:choice-` block_  
 
+Windows ISO Validator - portable GUI  
+------------------------------------  
+[WindowsISOValidator](WindowsISOValidator/) is a single-exe Rust desktop app that bundles this script and adds  
+native, resumable ESD downloads verified against Microsoft's catalog hashes, official multi-edition ISO links  
+with Microsoft's published SHA-256 table, hash validation of any ISO / ESD / WIM, and a form that launches  
+the script with the chosen version, preset, edition, language and architecture. Builds are produced by the  
+`Windows ISO Validator` GitHub Actions workflow (artifact `WindowsISOValidator-win64`), or with `cargo build --release`.  
+
 Simple deployment  
 -----------------   
 **auto.cmd** is behind ***Auto Upgrade*** preset via GUI  
