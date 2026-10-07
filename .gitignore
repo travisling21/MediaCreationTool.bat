@@ -1,3 +1,6 @@
 dev/
 $ISO$/
 *.iso
+WindowsISOValidator/target/
+WindowsISOValidator/downloads/
+WindowsISOValidator/mct/

@@ -1,0 +1,66 @@
+name: Windows ISO Validator
+
+on:
+  push:
+    paths:
+      - "WindowsISOValidator/**"
+      - "MediaCreationTool.bat"
+      - ".github/workflows/windows-iso-validator.yml"
+  pull_request:
+    paths:
+      - "WindowsISOValidator/**"
+      - "MediaCreationTool.bat"
+      - ".github/workflows/windows-iso-validator.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests (Linux) and Windows type check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: WindowsISOValidator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: WindowsISOValidator
+      - name: Unit tests
+        run: cargo test --release
+      - name: Type check for Windows
+        run: cargo check --release --target x86_64-pc-windows-gnu
+
+  build-windows:
+    name: Portable Windows build
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: WindowsISOValidator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: WindowsISOValidator
+      - name: Build (static CRT, see .cargo/config.toml)
+        run: cargo build --release
+      - name: Unit tests
+        run: cargo test --release
+      - name: Collect artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\WindowsISOValidator.exe dist\
+          Copy-Item README.md dist\README-WindowsISOValidator.md
+          Get-FileHash dist\WindowsISOValidator.exe -Algorithm SHA256 | Format-List
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WindowsISOValidator-win64
+          path: WindowsISOValidator/dist/
+          if-no-files-found: error
