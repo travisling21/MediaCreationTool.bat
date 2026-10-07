@@ -24,7 +24,7 @@ repository root, so the app and the script never drift apart.
 Building
 --------
 
-Requires a stable Rust toolchain (1.85 or newer).
+Requires a stable Rust toolchain (1.95 or newer, the minimum for egui 0.36).
 
     cd WindowsISOValidator
     cargo build --release          # on Windows: target\release\WindowsISOValidator.exe

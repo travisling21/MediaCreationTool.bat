@@ -16,26 +16,34 @@ const API: &str = "https://www.microsoft.com/software-download-connector/api/";
 #[derive(Debug, Clone)]
 pub struct Product {
     pub name: &'static str,
-    /// Download page slug, e.g. `windows11` or `windows10ISO`.
-    pub page: &'static str,
-    /// Product edition ids (Microsoft treats x64 and ARM64 as separate ids).
-    pub edition_ids: &'static [u32],
+    /// Download page slug and the product edition id it offers. Microsoft treats x64 and ARM64 as
+    /// separate pages / ids, each with its own hash table.
+    pub pages: &'static [(&'static str, u32)],
+}
+
+impl Product {
+    /// The page the live edition detection should read (the first one).
+    pub fn main_page(&self) -> &'static str {
+        self.pages.first().map(|p| p.0).unwrap_or("windows11")
+    }
 }
 
 /// Known product edition ids, after Fido's table. The current Windows 11 release id can also be
 /// detected live from the download page with [`detect_edition_ids`].
 pub const PRODUCTS: &[Product] = &[
-    Product { name: "Windows 11 - current release (multi-edition, x64 and ARM64)", page: "windows11", edition_ids: &[3813, 3816] },
-    Product { name: "Windows 11 Home China - current release", page: "windows11", edition_ids: &[3814, 3817] },
-    Product { name: "Windows 11 Pro China - current release", page: "windows11", edition_ids: &[3815, 3818] },
-    Product { name: "Windows 10 22H2 (multi-edition)", page: "windows10ISO", edition_ids: &[2618] },
-    Product { name: "Windows 10 Home China 22H2", page: "windows10ISO", edition_ids: &[2378] },
+    Product { name: "Windows 11 - current release (multi-edition, x64 and ARM64)", pages: &[("windows11", 3813), ("windows11arm64", 3816)] },
+    Product { name: "Windows 11 Home China - current release", pages: &[("windows11", 3814), ("windows11arm64", 3817)] },
+    Product { name: "Windows 11 Pro China - current release", pages: &[("windows11", 3815), ("windows11arm64", 3818)] },
+    Product { name: "Windows 10 22H2 (multi-edition)", pages: &[("windows10ISO", 2618)] },
+    Product { name: "Windows 10 Home China 22H2", pages: &[("windows10ISO", 2378)] },
 ];
 
 #[derive(Debug, Clone)]
 pub struct SkuRef {
     pub session_id: String,
     pub sku_id: String,
+    /// Download page the edition id belongs to (decides which hash table applies).
+    pub page: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +61,10 @@ pub struct IsoLink {
     pub url: String,
     pub file_name: String,
     pub expires: String,
+    /// API language name the link was requested for, e.g. `English (United Kingdom)`.
+    pub language: String,
+    /// Download page whose hash table applies, e.g. `windows11arm64`.
+    pub page: String,
 }
 
 #[derive(Debug, Clone)]
@@ -125,9 +137,9 @@ fn api_errors(v: &Value) -> Option<(i64, String)> {
 }
 
 /// Languages (SKUs) offered for a product. One session per edition id, as Microsoft requires.
-pub fn languages(http: &Client, locale: &str, edition_ids: &[u32]) -> Result<Vec<LanguageOption>> {
+pub fn languages(http: &Client, locale: &str, pages: &[(&str, u32)]) -> Result<Vec<LanguageOption>> {
     let mut out: Vec<LanguageOption> = Vec::new();
-    for &edition in edition_ids {
+    for &(page, edition) in pages {
         let session = new_session(http, locale)?;
         let url = format!(
             "{API}getskuinformationbyproductedition?profile={PROFILE_ID}&productEditionId={edition}&SKU=undefined&friendlyFileName=undefined&Locale={locale}&sessionID={session}"
@@ -169,13 +181,13 @@ pub fn languages(http: &Client, locale: &str, edition_ids: &[u32]) -> Result<Vec
                 let localized = s.get("LocalizedLanguage").and_then(|x| x.as_str()).unwrap_or(&language).to_string();
                 let pdn = s.get("ProductDisplayName").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 if let Some(existing) = out.iter_mut().find(|l| l.language == language) {
-                    existing.skus.push(SkuRef { session_id: session.clone(), sku_id });
+                    existing.skus.push(SkuRef { session_id: session.clone(), sku_id, page: page.to_string() });
                 } else {
                     out.push(LanguageOption {
                         language,
                         localized,
                         product_display_name: pdn,
-                        skus: vec![SkuRef { session_id: session.clone(), sku_id }],
+                        skus: vec![SkuRef { session_id: session.clone(), sku_id, page: page.to_string() }],
                     });
                 }
             }
@@ -239,6 +251,8 @@ pub fn links(http: &Client, locale: &str, lang: &LanguageOption) -> Result<Vec<I
                 url: link,
                 file_name,
                 expires: expires.clone(),
+                language: lang.language.clone(),
+                page: sku.page.clone(),
             });
         }
     }
@@ -248,10 +262,15 @@ pub fn links(http: &Client, locale: &str, lang: &LanguageOption) -> Result<Vec<I
     Ok(out)
 }
 
-/// The official SHA-256 table on the download page ("Hash values for the ISO files for Each Language").
-pub fn official_hashes(http: &Client, locale: &str, page: &str) -> Result<Vec<HashRow>> {
-    let html = get_text(http, &page_url(locale, page))?;
-    Ok(parse_hash_table(&html))
+/// The official SHA-256 table on a download page ("Hash values for the ISO files for Each Language").
+/// Always read from the English page: localized pages translate the labels.
+pub fn official_hashes(http: &Client, page: &str) -> Result<Vec<HashRow>> {
+    let html = get_text(http, &page_url("en-us", page))?;
+    let rows = parse_hash_table(&html);
+    if rows.is_empty() {
+        bail!("no hash table on the {page} page");
+    }
+    Ok(rows)
 }
 
 pub fn parse_hash_table(html: &str) -> Vec<HashRow> {
@@ -278,10 +297,10 @@ pub fn expected_hash<'a>(rows: &'a [HashRow], language: &str, arch: &str) -> Opt
         "Chinese (Traditional)" => "Chinese Traditional".to_string(),
         other => other.to_string(),
     };
+    // Both the x64 and the ARM64 page label their rows "64-bit"; the page itself tells them apart.
     let suffix = match arch {
-        "x64" => "64-bit",
+        "x64" | "ARM64" => "64-bit",
         "x86" => "32-bit",
-        "ARM64" => "ARM64",
         _ => return None,
     };
     let want = format!("{base} {suffix}").to_ascii_lowercase();
@@ -307,7 +326,8 @@ mod tests {
         assert_eq!(rows[0].sha256, "a75ae3f36cb9ffffedcb2d7ded9cef83ffb710eb1376610d2220684d987cb9a5");
         assert_eq!(expected_hash(&rows, "English (United Kingdom)", "x64").unwrap().label, "English International 64-bit");
         assert_eq!(expected_hash(&rows, "English", "x64").unwrap().sha256, rows[0].sha256);
-        assert!(expected_hash(&rows, "English", "ARM64").is_none());
+        assert_eq!(expected_hash(&rows, "English", "ARM64").unwrap().sha256, rows[0].sha256);
+        assert!(expected_hash(&rows, "English", "x86").is_none());
     }
 
     #[test]

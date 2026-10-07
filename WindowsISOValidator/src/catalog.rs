@@ -89,9 +89,13 @@ pub fn load(
     http: &reqwest::blocking::Client,
     cache_dir: &Path,
     progress: &Progress,
+    force_download: bool,
 ) -> Result<Catalog> {
     std::fs::create_dir_all(cache_dir).ok();
     let path = cache_file(cache_dir, choice);
+    if force_download {
+        std::fs::remove_file(&path).ok();
+    }
     let url = choice
         .cab
         .as_deref()
@@ -111,6 +115,10 @@ pub fn load(
     let (catalog_version, mut entries) = parse_products_xml(&xml).context("parsing products.xml")?;
     let mut notes = Vec::new();
     notes.push(format!("{} file entries listed by Microsoft (catalog schema {})", entries.len(), catalog_version));
+    let n = prefilter(&mut entries, choice);
+    if n > 0 {
+        notes.push(format!("{n} ARM64 / China entries dropped for this Windows 10 version, as the script does"));
+    }
     let n = apply_uup(&mut entries, choice, script);
     if n > 0 {
         notes.push(format!(
@@ -223,6 +231,19 @@ pub fn parse_products_xml(xml: &str) -> Result<(String, Vec<EsdEntry>)> {
         });
     }
     Ok((catalog_version, entries))
+}
+
+/// Mirror of the script's first products.xml pass for Windows 10 versions: it removes ARM64 entries
+/// and the `%BASE_CHINA%` entries, which the later business rewrite would otherwise mislabel.
+/// Windows 11 catalogs keep their ARM64 entries here (the script drops them too, but they are valid
+/// downloads for validation purposes and the UI hides them by default).
+pub fn prefilter(entries: &mut Vec<EsdEntry>, choice: &VersionChoice) -> usize {
+    if choice.ver >= 22000 {
+        return 0;
+    }
+    let before = entries.len();
+    entries.retain(|e| !e.arch.eq_ignore_ascii_case("ARM64") && e.edition_loc != "%BASE_CHINA%");
+    before - entries.len()
 }
 
 /// Mirror of the script's `11 25H2+` block: rewrite 24H2 template entries with the links from the UUP table.
@@ -363,8 +384,9 @@ mod tests {
             .replace("26100.4349.250607-1500.ge_release_svc_refresh", "19043.1288.211006-0459.21h1_release_svc_refresh")
             .replace("<Architecture>ARM64</Architecture>", "<Architecture>x86</Architecture>");
         let (_, mut entries) = parse_products_xml(&xml).unwrap();
+        assert_eq!(prefilter(&mut entries, choice), 1, "the %BASE_CHINA% entry is dropped for Windows 10");
         let n = apply_business(&mut entries, choice, script);
-        assert!(n >= 3, "updated {n}");
+        assert_eq!(n, 3, "updated {n}");
         let e = &entries[0];
         let row = script.business.iter().find(|r| r.ver == 19043 && r.client == "ret" && r.lang == "en-us").unwrap();
         assert_eq!(e.file_name, format!("{}_CLIENTCONSUMER_RET_x64FRE_en-us.esd", choice.cb));
@@ -382,13 +404,13 @@ mod tests {
         let choice = script.choice_by_vid("11_26H2").unwrap();
         let http = reqwest::blocking::Client::builder().user_agent(crate::util::BROWSER_UA).build().unwrap();
         let dir = std::env::temp_dir().join("wiv_live_catalog_test");
-        let cat = load(choice, script, &http, &dir, &Progress::default()).unwrap();
+        let cat = load(choice, script, &http, &dir, &Progress::default(), false).unwrap();
         assert_eq!(cat.entries.len(), 990);
         assert!(cat.entries.iter().all(|e| e.arch == "x64" && e.file_name.starts_with("26300.")));
         let en = cat.entries.iter().find(|e| e.lang_code == "en-us" && e.edition == "Professional").unwrap();
         assert_eq!(en.sha256.as_deref().unwrap().len(), 64);
         assert!(en.url.starts_with(DELIVERY_BASE));
-        let cat24 = load(script.choice_by_vid("11_24H2").unwrap(), script, &http, &dir, &Progress::default()).unwrap();
+        let cat24 = load(script.choice_by_vid("11_24H2").unwrap(), script, &http, &dir, &Progress::default(), false).unwrap();
         assert_eq!(cat24.entries.len(), 1978);
         assert_eq!(cat24.catalog_version, "2.0");
     }

@@ -1,7 +1,7 @@
 //! Driving the bundled MediaCreationTool.bat (Windows only at run time; the rest compiles everywhere).
 
 use crate::bat::SCRIPT;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -57,6 +57,16 @@ pub fn build_args(t: &McTask) -> Vec<String> {
     v
 }
 
+/// Only plain tokens may reach cmd.exe: letters, digits, `.`, `-`, `_`.
+pub fn validate_args(args: &[String]) -> Result<()> {
+    for a in args {
+        if a.is_empty() || !a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            bail!("argument {a:?} contains characters the script cannot take");
+        }
+    }
+    Ok(())
+}
+
 pub fn script_path(work_dir: &Path) -> PathBuf {
     work_dir.join("MediaCreationTool.bat")
 }
@@ -70,25 +80,27 @@ pub fn write_script(work_dir: &Path) -> Result<PathBuf> {
 }
 
 /// Launch the script in its own console window. It asks for elevation itself.
+/// The batch file is spawned directly so the standard library applies its batch-safe quoting.
 #[cfg(windows)]
 pub fn launch(work_dir: &Path, args: &[String]) -> Result<()> {
     use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    validate_args(args)?;
     let bat = write_script(work_dir)?;
-    let mut cmd = std::process::Command::new("cmd.exe");
-    cmd.arg("/d").arg("/c").arg("start").arg("MediaCreationTool").arg("/d").arg(work_dir).arg(&bat);
-    for a in args {
-        cmd.arg(a);
-    }
-    cmd.current_dir(work_dir).creation_flags(CREATE_NO_WINDOW);
-    cmd.spawn().context("starting cmd.exe")?;
+    std::process::Command::new(&bat)
+        .args(args)
+        .current_dir(work_dir)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .with_context(|| format!("starting {}", bat.display()))?;
     Ok(())
 }
 
 #[cfg(not(windows))]
-pub fn launch(work_dir: &Path, _args: &[String]) -> Result<()> {
+pub fn launch(work_dir: &Path, args: &[String]) -> Result<()> {
+    validate_args(args)?;
     let _ = write_script(work_dir)?;
-    anyhow::bail!("MediaCreationTool.bat can only run on Windows")
+    bail!("MediaCreationTool.bat can only run on Windows")
 }
 
 #[derive(Debug, Clone)]
@@ -105,25 +117,39 @@ pub struct McStatus {
     pub esd_dir_present: bool,
 }
 
-pub fn status(work_dir: &Path) -> McStatus {
-    let mut isos = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(work_dir) {
+fn isos_in(dir: &Path, out: &mut Vec<IsoFile>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().map(|x| x.eq_ignore_ascii_case("iso")).unwrap_or(false) {
+            if p.extension().map(|x| x.eq_ignore_ascii_case("iso")).unwrap_or(false) && !out.iter().any(|f| f.path == p) {
                 if let Ok(m) = e.metadata() {
-                    isos.push(IsoFile { path: p, size: m.len(), modified: m.modified().ok() });
+                    out.push(IsoFile { path: p, size: m.len(), modified: m.modified().ok() });
                 }
             }
         }
+    }
+}
+
+/// ISOs in the work folder and in the script's own `C:\ESD` folder (used when the script decides
+/// it was run from a temp location), newest first.
+pub fn status(work_dir: &Path) -> McStatus {
+    let mut isos = Vec::new();
+    isos_in(work_dir, &mut isos);
+    if let Some(root) = esd_root() {
+        isos_in(&root, &mut isos);
     }
     isos.sort_by_key(|f| std::cmp::Reverse(f.modified));
     McStatus { isos, setup_running: setup_running(), esd_dir_present: esd_dir().map(|p| p.exists()).unwrap_or(false) }
 }
 
-pub fn esd_dir() -> Option<PathBuf> {
+/// The script's work root, `%SystemDrive%\ESD`.
+pub fn esd_root() -> Option<PathBuf> {
     let drive = std::env::var("SystemDrive").ok()?;
-    Some(PathBuf::from(format!("{drive}\\ESD\\MCT")))
+    Some(PathBuf::from(format!("{drive}\\ESD")))
+}
+
+pub fn esd_dir() -> Option<PathBuf> {
+    esd_root().map(|p| p.join("MCT"))
 }
 
 #[cfg(windows)]
@@ -159,9 +185,13 @@ mod tests {
             def: false,
             no_update: true,
         };
-        assert_eq!(build_args(&t), vec!["20.2", "Pro", "en-US", "x64", "no_update"]);
+        let args = build_args(&t);
+        assert_eq!(args, vec!["20.2", "Pro", "en-US", "x64", "no_update"]);
+        validate_args(&args).unwrap();
         let t2 = McTask { preset: Preset::AutoUpgrade, edition: String::new(), lang: String::new(), arch: String::new(), def: true, no_update: false, ..t };
         assert_eq!(build_args(&t2), vec!["20.1", "def"]);
+        assert!(validate_args(&["en US".to_string()]).is_err());
+        assert!(validate_args(&["x&calc".to_string()]).is_err());
     }
 
     #[test]

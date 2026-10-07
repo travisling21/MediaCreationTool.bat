@@ -2,7 +2,7 @@
 name = "windows-iso-validator"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "Portable Windows ISO downloader and validator with MediaCreationTool.bat integration"
 license = "MIT"
 publish = false

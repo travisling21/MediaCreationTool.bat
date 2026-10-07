@@ -9,6 +9,8 @@ use std::time::Instant;
 pub struct Progress {
     pub done: AtomicU64,
     pub total: AtomicU64,
+    /// `done` value at the moment the rate measurement (re)started.
+    pub base: AtomicU64,
     pub cancel: AtomicBool,
     pub stage: Mutex<String>,
     pub started: Mutex<Option<Instant>>,
@@ -19,6 +21,7 @@ impl Default for Progress {
         Self {
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),
+            base: AtomicU64::new(0),
             cancel: AtomicBool::new(false),
             stage: Mutex::new(String::new()),
             started: Mutex::new(None),
@@ -35,7 +38,13 @@ impl Progress {
     }
     pub fn start(&self, total: u64) {
         self.done.store(0, Ordering::Relaxed);
+        self.base.store(0, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
+        *self.started.lock().unwrap() = Some(Instant::now());
+    }
+    /// Restart the rate measurement from the current position (e.g. after re-hashing a resumed part).
+    pub fn mark_rate_base(&self) {
+        self.base.store(self.done.load(Ordering::Relaxed), Ordering::Relaxed);
         *self.started.lock().unwrap() = Some(Instant::now());
     }
     pub fn add(&self, n: u64) {
@@ -55,14 +64,15 @@ impl Progress {
     pub fn request_cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
-    /// Average bytes per second since start.
+    /// Average bytes per second since the rate measurement started.
     pub fn rate(&self) -> f64 {
         let started = self.started.lock().unwrap();
         match *started {
             Some(t) => {
                 let secs = t.elapsed().as_secs_f64();
                 if secs > 0.2 {
-                    self.done.load(Ordering::Relaxed) as f64 / secs
+                    let done = self.done.load(Ordering::Relaxed).saturating_sub(self.base.load(Ordering::Relaxed));
+                    done as f64 / secs
                 } else {
                     0.0
                 }
@@ -94,4 +104,22 @@ pub const BROWSER_UA: &str =
 /// Normalise a hex digest for comparison.
 pub fn norm_hex(s: &str) -> String {
     s.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase()
+}
+
+/// True when `path` lies inside one of the temp directories (the script relocates its output when run from there).
+pub fn is_under_temp(path: &std::path::Path) -> bool {
+    let mut temps = vec![std::env::temp_dir()];
+    for var in ["TEMP", "TMP"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                temps.push(std::path::PathBuf::from(v));
+            }
+        }
+    }
+    let norm = |p: &std::path::Path| p.display().to_string().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    let p = norm(path);
+    temps.iter().any(|t| {
+        let t = norm(t);
+        !t.is_empty() && (p == t || p.starts_with(&format!("{t}\\")))
+    })
 }

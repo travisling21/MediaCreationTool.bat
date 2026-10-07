@@ -39,6 +39,9 @@ const EDITIONS: &[&str] = &[
     "CoreCountrySpecific",
 ];
 
+const MS_REFERER: &str = "https://www.microsoft.com/software-download/windows11";
+const STATUS_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Catalog,
@@ -48,13 +51,16 @@ enum Tab {
     Settings,
 }
 
+type HashTables = BTreeMap<String, Vec<msdl::HashRow>>;
+
 enum TaskOutput {
     Catalog(Catalog),
     Download { label: String, result: download::DownloadResult, expected: Option<(String, String)> },
     Hash { path: PathBuf, hashes: Hashes, info: Option<iso::MediaInfo> },
-    MsEditions(Vec<(u32, String)>),
-    MsLanguages(Vec<msdl::LanguageOption>),
-    MsLinks { links: Vec<msdl::IsoLink>, hashes: Vec<msdl::HashRow> },
+    MsEditions { product: usize, list: Vec<(u32, String)> },
+    MsLanguages { product: usize, langs: Vec<msdl::LanguageOption> },
+    MsLinks { product: usize, language: String, links: Vec<msdl::IsoLink>, hashes: HashTables, hash_errors: Vec<String> },
+    McStatus(McStatus),
 }
 
 struct Task {
@@ -96,7 +102,7 @@ struct ValResult {
 }
 
 enum Action {
-    LoadCatalog(String),
+    LoadCatalog { vid: String, force: bool },
     DownloadEsd(CatRow),
     Copy(String),
     OpenUrl(String),
@@ -119,6 +125,7 @@ enum Action {
 
 pub struct App {
     cfg: Config,
+    cfg_path: PathBuf,
     script: &'static Script,
     http: Client,
     dl_http: Client,
@@ -143,7 +150,8 @@ pub struct App {
     ms_langs: Vec<msdl::LanguageOption>,
     ms_lang: usize,
     ms_links: Vec<msdl::IsoLink>,
-    ms_hashes: Vec<msdl::HashRow>,
+    ms_hashes: HashTables,
+    ms_hash_errors: Vec<String>,
     // validate tab
     val_path: String,
     val_expected: String,
@@ -169,15 +177,18 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_zoom_factor(1.0);
         let cfg = config::load();
+        let cfg_path = config::config_path();
         let script = bat::script();
         let http = Client::builder()
             .user_agent(util::BROWSER_UA)
             .timeout(Duration::from_secs(60))
             .build()
             .expect("http client");
+        // The blocking client's timeout applies to every read, which keeps Cancel responsive on
+        // stalled transfers; download.rs tolerates a few consecutive timeouts before giving up.
         let dl_http = Client::builder()
             .user_agent(util::BROWSER_UA)
-            .timeout(None)
+            .timeout(Duration::from_secs(download::DL_READ_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .expect("download client");
@@ -189,6 +200,7 @@ impl App {
             settings_work_dir: cfg.work_dir.display().to_string(),
             settings_locale: cfg.ms_locale.clone(),
             cfg,
+            cfg_path,
             script,
             http,
             dl_http,
@@ -211,7 +223,8 @@ impl App {
             ms_langs: Vec::new(),
             ms_lang: 0,
             ms_links: Vec::new(),
-            ms_hashes: Vec::new(),
+            ms_hashes: BTreeMap::new(),
+            ms_hash_errors: Vec::new(),
             val_path: String::new(),
             val_expected: String::new(),
             val_result: None,
@@ -232,7 +245,8 @@ impl App {
             script.choices.len(),
             script.choices.first().map(|c| c.label()).unwrap_or_default()
         ));
-        app.log(format!("Config file: {}", config::config_path().display()));
+        let p = app.cfg_path.display().to_string();
+        app.log(format!("Config file: {p}"));
         app
     }
 
@@ -249,7 +263,11 @@ impl App {
         self.tasks.iter().any(|t| t.name.starts_with(prefix))
     }
 
-    fn spawn<F>(&mut self, ctx: &egui::Context, name: impl Into<String>, f: F)
+    fn download_task_name(file_name: &str) -> String {
+        format!("download {file_name}")
+    }
+
+    fn spawn<F>(&mut self, ctx: &egui::Context, name: impl Into<String>, quiet: bool, f: F)
     where
         F: FnOnce(&Progress) -> Result<TaskOutput> + Send + 'static,
     {
@@ -268,7 +286,9 @@ impl App {
             let _ = tx.send(msg);
             ctx2.request_repaint();
         });
-        self.log(format!("Started: {name}"));
+        if !quiet {
+            self.log(format!("Started: {name}"));
+        }
         self.tasks.push(Task { id: self.next_task_id, name, progress, rx });
         self.next_task_id += 1;
     }
@@ -283,13 +303,13 @@ impl App {
         for (i, name, msg) in finished.into_iter().rev() {
             self.tasks.remove(i);
             match msg {
-                Ok(out) => self.handle_output(name, out),
+                Ok(out) => self.handle_output(out),
                 Err(e) => self.log(format!("Failed: {name}: {e}")),
             }
         }
     }
 
-    fn handle_output(&mut self, name: String, out: TaskOutput) {
+    fn handle_output(&mut self, out: TaskOutput) {
         match out {
             TaskOutput::Catalog(c) => {
                 self.log(format!("{}: {} entries ({} files) loaded", c.label, c.entries.len(), c.distinct_files().len()));
@@ -300,6 +320,9 @@ impl App {
                 if result.resumed_from > 0 && result.resumed_from < result.bytes {
                     self.log(format!("Resumed {label} from {}", human_bytes(result.resumed_from)));
                 }
+                if result.reused_existing {
+                    self.log(format!("{label} already existed with the expected size - checked the existing file"));
+                }
                 let verified = expected.as_ref().map(|(algo, hex)| {
                     let got = match algo.as_str() {
                         "SHA-256" => &result.hashes.sha256,
@@ -308,14 +331,28 @@ impl App {
                     };
                     got == &norm_hex(hex)
                 });
+                let mut path = result.path.clone();
                 match verified {
                     Some(true) => self.log(format!("Verified OK: {label} ({})", human_bytes(result.bytes))),
-                    Some(false) => self.log(format!("HASH MISMATCH: {label} - the file is corrupt or not the expected build")),
+                    Some(false) => {
+                        // Move the bad file aside so the next click fetches a fresh copy.
+                        let mut bad = result.path.as_os_str().to_os_string();
+                        bad.push(".corrupt");
+                        let bad = PathBuf::from(bad);
+                        std::fs::remove_file(&bad).ok();
+                        match std::fs::rename(&result.path, &bad) {
+                            Ok(_) => {
+                                path = bad.clone();
+                                self.log(format!("HASH MISMATCH: {label} - renamed to {} - download again for a fresh copy", bad.display()));
+                            }
+                            Err(e) => self.log(format!("HASH MISMATCH: {label} - the file is corrupt or not the expected build (could not rename it: {e})")),
+                        }
+                    }
                     None => self.log(format!("Downloaded (no reference hash available): {label}")),
                 }
                 self.completed.push(Completed {
                     label,
-                    path: result.path,
+                    path,
                     size: result.bytes,
                     hashes: result.hashes,
                     expected,
@@ -324,28 +361,55 @@ impl App {
                 });
             }
             TaskOutput::Hash { path, hashes, info } => {
+                if path.display().to_string() != self.val_path.trim() {
+                    self.log(format!("Hashed {} (a different file is selected now)", path.display()));
+                }
                 let verdicts = self.verdicts_for(&hashes);
                 self.log(format!("Hashed {}: SHA-256 {}", path.display(), hashes.sha256));
                 self.val_result = Some(ValResult { path, hashes, info, verdicts });
             }
-            TaskOutput::MsEditions(list) => {
-                self.log(format!("Download page lists {} product edition(s): {}", list.len(), list.iter().map(|(id, n)| format!("{n} [{id}]")).collect::<Vec<_>>().join(", ")));
+            TaskOutput::MsEditions { product, list } => {
+                if product != self.ms_product {
+                    return;
+                }
+                self.log(format!(
+                    "Download page lists {} product edition(s): {}",
+                    list.len(),
+                    list.iter().map(|(id, n)| format!("{n} [{id}]")).collect::<Vec<_>>().join(", ")
+                ));
                 self.ms_live_editions = list;
                 self.ms_live_selected = Some(0);
             }
-            TaskOutput::MsLanguages(l) => {
-                self.log(format!("{} languages available", l.len()));
-                self.ms_langs = l;
+            TaskOutput::MsLanguages { product, langs } => {
+                if product != self.ms_product {
+                    self.log("Ignored a language list for a product that is no longer selected");
+                    return;
+                }
+                self.log(format!("{} languages available", langs.len()));
+                self.ms_langs = langs;
                 self.ms_lang = self.ms_langs.iter().position(|l| l.language == "English").unwrap_or(0);
                 self.ms_links.clear();
             }
-            TaskOutput::MsLinks { links, hashes } => {
-                self.log(format!("{} download link(s), {} official hash rows", links.len(), hashes.len()));
+            TaskOutput::MsLinks { product, language, links, hashes, hash_errors } => {
+                let current = self.ms_langs.get(self.ms_lang).map(|l| l.language.clone()).unwrap_or_default();
+                if product != self.ms_product || language != current {
+                    self.log(format!("Ignored download links for {language}: the selection changed meanwhile"));
+                    return;
+                }
+                let rows: usize = hashes.values().map(|v| v.len()).sum();
+                self.log(format!("{} download link(s), {} official hash rows", links.len(), rows));
+                for e in &hash_errors {
+                    self.log(format!("Official hash table unavailable: {e}"));
+                }
                 self.ms_links = links;
                 self.ms_hashes = hashes;
+                self.ms_hash_errors = hash_errors;
+            }
+            TaskOutput::McStatus(s) => {
+                self.mct_status = s;
+                self.mct_status_at = Some(Instant::now());
             }
         }
-        let _ = name;
     }
 
     fn verdicts_for(&self, h: &Hashes) -> Vec<(bool, String)> {
@@ -369,8 +433,10 @@ impl App {
                 v.push((true, format!("Matches Microsoft's catalog for {}: {} ({} {} {})", c.label, e.file_name, e.lang_code, e.channel(), e.arch)));
             }
         }
-        if let Some(row) = self.ms_hashes.iter().find(|r| r.sha256 == h.sha256) {
-            v.push((true, format!("Matches Microsoft's published ISO hash: {}", row.label)));
+        for (page, rows) in &self.ms_hashes {
+            if let Some(row) = rows.iter().find(|r| r.sha256 == h.sha256) {
+                v.push((true, format!("Matches Microsoft's published ISO hash on the {page} page: {}", row.label)));
+            }
         }
         if v.is_empty() {
             v.push((false, "No reference matched. Enter an expected hash, load a catalog, or fetch Microsoft's ISO hashes to compare.".into()));
@@ -429,27 +495,53 @@ impl App {
         self.cat_rows.sort_by_key(|r| (r.lang.clone(), r.channel.clone(), r.arch.clone()));
     }
 
+    fn selected_pages(&self) -> Vec<(String, u32)> {
+        let product = &msdl::PRODUCTS[self.ms_product];
+        match self.ms_live_selected {
+            Some(i) if i < self.ms_live_editions.len() => vec![(product.main_page().to_string(), self.ms_live_editions[i].0)],
+            _ => product.pages.iter().map(|(p, id)| (p.to_string(), *id)).collect(),
+        }
+    }
+
+    fn reset_ms_product_state(&mut self) {
+        self.ms_live_editions.clear();
+        self.ms_live_selected = None;
+        self.ms_langs.clear();
+        self.ms_lang = 0;
+        self.ms_links.clear();
+        self.ms_hashes.clear();
+        self.ms_hash_errors.clear();
+    }
+
     // ------------------------------------------------------------------ actions
 
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::LoadCatalog(vid) => {
+            Action::LoadCatalog { vid, force } => {
                 let Some(choice) = self.script.choice_by_vid(&vid).cloned() else { return };
+                if self.busy(&format!("catalog {}", choice.vid)) {
+                    return;
+                }
                 let http = self.http.clone();
                 let script = self.script;
                 let cache = self.cfg.download_dir.join("catalogs");
-                self.spawn(ctx, format!("catalog {}", choice.vid), move |p| {
-                    catalog::load(&choice, script, &http, &cache, p).map(TaskOutput::Catalog)
+                self.spawn(ctx, format!("catalog {}", choice.vid), false, move |p| {
+                    catalog::load(&choice, script, &http, &cache, p, force).map(TaskOutput::Catalog)
                 });
             }
             Action::DownloadEsd(row) => {
+                let name = Self::download_task_name(&row.file_name);
+                if self.busy(&name) {
+                    self.log(format!("{} is already downloading", row.file_name));
+                    return;
+                }
                 let dest = self.cfg.download_dir.join(&row.file_name);
                 let http = self.dl_http.clone();
                 let expected = if row.hash.is_empty() { None } else { Some((row.hash_algo.clone(), row.hash.clone())) };
                 let label = row.file_name.clone();
                 let url = row.url.clone();
                 let size = row.size;
-                self.spawn(ctx, format!("download {}", row.file_name), move |p| {
+                self.spawn(ctx, name, false, move |p| {
                     let req = DownloadRequest { url: &url, dest: &dest, expected_size: Some(size), referer: None };
                     let result = download::download(&http, &req, p)?;
                     Ok(TaskOutput::Download { label, result, expected })
@@ -470,60 +562,100 @@ impl App {
                 }
             }
             Action::MsDetect => {
+                if self.busy("microsoft") {
+                    return;
+                }
                 let http = self.http.clone();
                 let locale = self.cfg.ms_locale.clone();
-                let page = msdl::PRODUCTS[self.ms_product].page;
-                self.spawn(ctx, "microsoft editions", move |p| {
+                let product = self.ms_product;
+                let page = msdl::PRODUCTS[product].main_page();
+                self.spawn(ctx, "microsoft editions", false, move |p| {
                     p.set_stage("Reading the download page");
-                    msdl::detect_edition_ids(&http, &locale, page).map(TaskOutput::MsEditions)
+                    msdl::detect_edition_ids(&http, &locale, page).map(|list| TaskOutput::MsEditions { product, list })
                 });
             }
             Action::MsLanguages => {
+                if self.busy("microsoft") {
+                    return;
+                }
                 let http = self.http.clone();
                 let locale = self.cfg.ms_locale.clone();
-                let ids: Vec<u32> = match self.ms_live_selected {
-                    Some(i) if i < self.ms_live_editions.len() => vec![self.ms_live_editions[i].0],
-                    _ => msdl::PRODUCTS[self.ms_product].edition_ids.to_vec(),
-                };
-                self.spawn(ctx, "microsoft languages", move |p| {
+                let product = self.ms_product;
+                let pages = self.selected_pages();
+                self.ms_links.clear();
+                self.spawn(ctx, "microsoft languages", false, move |p| {
                     p.set_stage("Creating a download session and listing languages");
-                    msdl::languages(&http, &locale, &ids).map(TaskOutput::MsLanguages)
+                    let refs: Vec<(&str, u32)> = pages.iter().map(|(pg, id)| (pg.as_str(), *id)).collect();
+                    msdl::languages(&http, &locale, &refs).map(|langs| TaskOutput::MsLanguages { product, langs })
                 });
             }
             Action::MsLinks => {
+                if self.busy("microsoft") {
+                    return;
+                }
                 let Some(lang) = self.ms_langs.get(self.ms_lang).cloned() else { return };
                 let http = self.http.clone();
                 let locale = self.cfg.ms_locale.clone();
-                let page = msdl::PRODUCTS[self.ms_product].page;
-                self.spawn(ctx, "microsoft links", move |p| {
+                let product = self.ms_product;
+                let language = lang.language.clone();
+                self.ms_links.clear();
+                self.spawn(ctx, "microsoft links", false, move |p| {
                     p.set_stage("Requesting download links");
                     let links = msdl::links(&http, &locale, &lang)?;
-                    p.set_stage("Reading the official hash table");
-                    let hashes = msdl::official_hashes(&http, &locale, page).unwrap_or_default();
-                    Ok(TaskOutput::MsLinks { links, hashes })
+                    p.set_stage("Reading the official hash tables");
+                    let mut hashes = HashTables::new();
+                    let mut hash_errors = Vec::new();
+                    let mut pages: Vec<String> = links.iter().map(|l| l.page.clone()).collect();
+                    pages.sort();
+                    pages.dedup();
+                    for page in pages {
+                        match msdl::official_hashes(&http, &page) {
+                            Ok(rows) => {
+                                hashes.insert(page, rows);
+                            }
+                            Err(e) => hash_errors.push(format!("{page}: {e:#}")),
+                        }
+                    }
+                    Ok(TaskOutput::MsLinks { product, language, links, hashes, hash_errors })
                 });
             }
             Action::MsDownload(i) => {
                 let Some(link) = self.ms_links.get(i).cloned() else { return };
-                let lang = self.ms_langs.get(self.ms_lang).map(|l| l.language.clone()).unwrap_or_default();
-                let expected = msdl::expected_hash(&self.ms_hashes, &lang, &link.arch).map(|r| ("SHA-256".to_string(), r.sha256.clone()));
+                let name = Self::download_task_name(&link.file_name);
+                if self.busy(&name) {
+                    self.log(format!("{} is already downloading", link.file_name));
+                    return;
+                }
+                let expected = self
+                    .ms_hashes
+                    .get(&link.page)
+                    .and_then(|rows| msdl::expected_hash(rows, &link.language, &link.arch))
+                    .map(|r| ("SHA-256".to_string(), r.sha256.clone()));
                 let dest = self.cfg.download_dir.join(&link.file_name);
                 let http = self.dl_http.clone();
+                let probe = self.http.clone();
                 let label = link.file_name.clone();
                 let url = link.url.clone();
-                self.spawn(ctx, format!("download {}", link.file_name), move |p| {
-                    let req = DownloadRequest { url: &url, dest: &dest, expected_size: None, referer: Some("https://www.microsoft.com/software-download/windows11") };
+                self.spawn(ctx, name, false, move |p| {
+                    p.set_stage("Asking the server for the file size");
+                    let size = download::remote_size(&probe, &url, Some(MS_REFERER));
+                    let req = DownloadRequest { url: &url, dest: &dest, expected_size: size, referer: Some(MS_REFERER) };
                     let result = download::download(&http, &req, p)?;
                     Ok(TaskOutput::Download { label, result, expected })
                 });
             }
             Action::Hash => {
+                if self.busy("hash ") {
+                    self.log("A file is already being hashed - wait for it or cancel it first");
+                    return;
+                }
                 let path = PathBuf::from(self.val_path.trim());
                 if !path.is_file() {
                     self.log(format!("Not a file: {}", path.display()));
                     return;
                 }
-                self.spawn(ctx, format!("hash {}", path.display()), move |p| {
+                self.val_result = None;
+                self.spawn(ctx, format!("hash {}", path.display()), false, move |p| {
                     let info = iso::inspect(&path).ok();
                     let hashes = hashing::hash_file(&path, p)?;
                     Ok(TaskOutput::Hash { path, hashes, info })
@@ -570,8 +702,11 @@ impl App {
                 self.mct_status_at = None;
             }
             Action::McRefresh => {
-                self.mct_status = mct::status(&self.cfg.work_dir);
-                self.mct_status_at = Some(Instant::now());
+                if self.busy("mct status") {
+                    return;
+                }
+                let work = self.cfg.work_dir.clone();
+                self.spawn(ctx, "mct status", true, move |_| Ok(TaskOutput::McStatus(mct::status(&work))));
             }
             Action::ValidatePath(p) => {
                 self.val_path = p.display().to_string();
@@ -580,14 +715,36 @@ impl App {
                 self.apply(ctx, Action::Hash);
             }
             Action::SaveConfig => {
-                self.cfg.download_dir = PathBuf::from(self.settings_download_dir.trim());
-                self.cfg.work_dir = PathBuf::from(self.settings_work_dir.trim());
-                self.cfg.ms_locale = self.settings_locale.trim().to_string();
+                let defaults = Config::default();
+                let mut download_dir = PathBuf::from(self.settings_download_dir.trim());
+                let mut work_dir = PathBuf::from(self.settings_work_dir.trim());
+                if download_dir.as_os_str().is_empty() || !download_dir.is_absolute() {
+                    self.log("Download folder must be an absolute path - using the default");
+                    download_dir = defaults.download_dir.clone();
+                }
+                if work_dir.as_os_str().is_empty() || !work_dir.is_absolute() {
+                    self.log("Work folder must be an absolute path - using the default");
+                    work_dir = defaults.work_dir.clone();
+                }
+                if util::is_under_temp(&work_dir) {
+                    self.log("Warning: the work folder is inside the temp directory, so the script will write its ISO to C:\\ESD instead");
+                }
+                let locale = self.settings_locale.trim();
+                self.cfg.ms_locale = if locale.is_empty() { "en-US".to_string() } else { locale.to_string() };
+                self.cfg.download_dir = download_dir;
+                self.cfg.work_dir = work_dir;
                 self.cfg.last_vid = self.cat_vid.clone();
+                self.settings_download_dir = self.cfg.download_dir.display().to_string();
+                self.settings_work_dir = self.cfg.work_dir.display().to_string();
+                self.settings_locale = self.cfg.ms_locale.clone();
                 match config::save(&self.cfg) {
-                    Ok(_) => self.log(format!("Settings saved to {}", config::config_path().display())),
+                    Ok(_) => {
+                        let p = self.cfg_path.display().to_string();
+                        self.log(format!("Settings saved to {p}"));
+                    }
                     Err(e) => self.log(format!("Could not save settings: {e:#}")),
                 }
+                self.mct_status_at = None;
             }
             Action::CancelTask(id) => {
                 if let Some(t) = self.tasks.iter().find(|t| t.id == id) {
@@ -625,10 +782,16 @@ impl App {
             });
             let loaded = self.catalogs.contains_key(&self.cat_vid);
             let busy = self.busy(&format!("catalog {}", self.cat_vid));
-            let text = if loaded { "Reload catalog" } else { "Load catalog" };
-            if ui.add_enabled(!busy, egui::Button::new(text)).clicked() {
+            if ui.add_enabled(!busy && !loaded, egui::Button::new("Load catalog")).clicked() {
+                actions.push(Action::LoadCatalog { vid: self.cat_vid.clone(), force: false });
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Refresh from Microsoft"))
+                .on_hover_text("Discards the cached products.cab and downloads it again")
+                .clicked()
+            {
                 self.catalogs.remove(&self.cat_vid);
-                actions.push(Action::LoadCatalog(self.cat_vid.clone()));
+                actions.push(Action::LoadCatalog { vid: self.cat_vid.clone(), force: true });
             }
             if let Some(c) = self.script.choice_by_vid(&self.cat_vid) {
                 ui.label(RichText::new(&c.note).weak().small());
@@ -668,9 +831,14 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.cat_filter).desired_width(160.0).hint_text("edition or file name"));
         });
         self.rebuild_cat_rows();
+        if self.cat_rows.is_empty() {
+            ui.label(RichText::new("No file matches the current filters.").weak());
+            return;
+        }
         ui.label(RichText::new(format!("{} file(s) - Consumer = Home/Pro/Edu, Business = Pro VL/Enterprise", self.cat_rows.len())).weak());
         let rows = &self.cat_rows;
         let dl_dir = self.cfg.download_dir.clone();
+        let active: Vec<String> = self.tasks.iter().map(|t| t.name.clone()).collect();
         let height = ui.available_height() - 4.0;
         TableBuilder::new(ui)
             .striped(true)
@@ -713,7 +881,9 @@ impl App {
                         ui.label(RichText::new(short).monospace()).on_hover_text(&r.hash);
                     });
                     row.col(|ui| {
-                        if ui.button("Download").on_hover_text(dl_dir.join(&r.file_name).display().to_string()).clicked() {
+                        let running = active.iter().any(|n| n == &Self::download_task_name(&r.file_name));
+                        let text = if running { "Downloading…" } else { "Download" };
+                        if ui.add_enabled(!running, egui::Button::new(text)).on_hover_text(dl_dir.join(&r.file_name).display().to_string()).clicked() {
                             actions.push(Action::DownloadEsd(r.clone()));
                         }
                         if ui.button("Copy link").clicked() {
@@ -726,22 +896,27 @@ impl App {
 
     fn ui_microsoft(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.label("Official multi-edition ISO links straight from Microsoft's download page (the same method Rufus / Fido use). Links are valid for 24 hours and Microsoft rate-limits requests per IP address.");
+        let ms_busy = self.busy("microsoft");
+        let mut product_changed = false;
         ui.horizontal(|ui| {
             ui.label("Product:");
             let name = msdl::PRODUCTS[self.ms_product].name;
-            egui::ComboBox::from_id_salt("ms_product").selected_text(name).width(380.0).show_ui(ui, |ui| {
-                for (i, p) in msdl::PRODUCTS.iter().enumerate() {
-                    if ui.selectable_value(&mut self.ms_product, i, p.name).changed() {
-                        self.ms_live_selected = None;
-                        self.ms_langs.clear();
-                        self.ms_links.clear();
+            ui.add_enabled_ui(!ms_busy, |ui| {
+                egui::ComboBox::from_id_salt("ms_product").selected_text(name).width(380.0).show_ui(ui, |ui| {
+                    for (i, p) in msdl::PRODUCTS.iter().enumerate() {
+                        if ui.selectable_value(&mut self.ms_product, i, p.name).changed() {
+                            product_changed = true;
+                        }
                     }
-                }
+                });
             });
-            if ui.add_enabled(!self.busy("microsoft"), egui::Button::new("Detect editions on the page")).on_hover_text("Reads the product list currently offered on the download page").clicked() {
+            if ui.add_enabled(!ms_busy, egui::Button::new("Detect editions on the page")).on_hover_text("Reads the product list currently offered on the download page").clicked() {
                 actions.push(Action::MsDetect);
             }
         });
+        if product_changed {
+            self.reset_ms_product_state();
+        }
         if !self.ms_live_editions.is_empty() {
             ui.horizontal(|ui| {
                 ui.label("Edition from the page:");
@@ -754,8 +929,9 @@ impl App {
                 });
             });
         }
+        let mut lang_changed = false;
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.busy("microsoft"), egui::Button::new("1. Fetch languages")).clicked() {
+            if ui.add_enabled(!ms_busy, egui::Button::new("1. Fetch languages")).clicked() {
                 actions.push(Action::MsLanguages);
             }
             if !self.ms_langs.is_empty() {
@@ -763,18 +939,27 @@ impl App {
                 let sel = self.ms_langs.get(self.ms_lang).map(|l| format!("{} ({})", l.language, l.product_display_name)).unwrap_or_default();
                 egui::ComboBox::from_id_salt("ms_lang").selected_text(sel).width(360.0).show_ui(ui, |ui| {
                     for (i, l) in self.ms_langs.iter().enumerate() {
-                        ui.selectable_value(&mut self.ms_lang, i, format!("{} ({})", l.language, l.product_display_name)).on_hover_text(&l.localized);
+                        if ui.selectable_value(&mut self.ms_lang, i, format!("{} ({})", l.language, l.product_display_name)).on_hover_text(&l.localized).changed() {
+                            lang_changed = true;
+                        }
                     }
                 });
-                if ui.add_enabled(!self.busy("microsoft"), egui::Button::new("2. Get download links")).clicked() {
+                if ui.add_enabled(!ms_busy, egui::Button::new("2. Get download links")).clicked() {
                     actions.push(Action::MsLinks);
                 }
             }
         });
+        if lang_changed {
+            self.ms_links.clear();
+        }
         if !self.ms_links.is_empty() {
             ui.separator();
-            let lang = self.ms_langs.get(self.ms_lang).map(|l| l.language.clone()).unwrap_or_default();
-            ui.label(RichText::new(format!("Links expire {}. Official SHA-256 rows loaded: {}", self.ms_links[0].expires, self.ms_hashes.len())).weak());
+            let rows: usize = self.ms_hashes.values().map(|v| v.len()).sum();
+            ui.label(RichText::new(format!("Links expire {}. Official SHA-256 rows loaded: {}", self.ms_links[0].expires, rows)).weak());
+            for e in &self.ms_hash_errors {
+                ui.label(RichText::new(format!("Hash table unavailable: {e}")).color(Color32::from_rgb(230, 160, 60)).small());
+            }
+            let active: Vec<String> = self.tasks.iter().map(|t| t.name.clone()).collect();
             egui::Grid::new("ms_links").num_columns(5).spacing([12.0, 6.0]).striped(true).show(ui, |ui| {
                 ui.strong("Arch");
                 ui.strong("File");
@@ -784,16 +969,17 @@ impl App {
                 ui.end_row();
                 for (i, l) in self.ms_links.iter().enumerate() {
                     ui.label(&l.arch);
-                    ui.label(&l.file_name).on_hover_text(&l.name);
-                    match msdl::expected_hash(&self.ms_hashes, &lang, &l.arch) {
+                    ui.label(&l.file_name).on_hover_text(format!("{} - {}", l.name, l.language));
+                    match self.ms_hashes.get(&l.page).and_then(|rows| msdl::expected_hash(rows, &l.language, &l.arch)) {
                         Some(r) => {
-                            ui.label(RichText::new(format!("{}…", &r.sha256[..16])).monospace()).on_hover_text(&r.sha256);
+                            ui.label(RichText::new(format!("{}…", &r.sha256[..16])).monospace()).on_hover_text(format!("{} ({} page)", r.sha256, l.page));
                         }
                         None => {
                             ui.label(RichText::new("not published").weak());
                         }
                     }
-                    if ui.button("Download and verify").clicked() {
+                    let running = active.iter().any(|n| n == &Self::download_task_name(&l.file_name));
+                    if ui.add_enabled(!running, egui::Button::new(if running { "Downloading…" } else { "Download and verify" })).clicked() {
                         actions.push(Action::MsDownload(i));
                     }
                     ui.horizontal(|ui| {
@@ -809,13 +995,17 @@ impl App {
             });
         }
         if !self.ms_hashes.is_empty() {
-            ui.collapsing(format!("Microsoft's published hash table ({} rows)", self.ms_hashes.len()), |ui| {
+            let rows: usize = self.ms_hashes.values().map(|v| v.len()).sum();
+            ui.collapsing(format!("Microsoft's published hash tables ({rows} rows)"), |ui| {
                 egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    for r in &self.ms_hashes {
-                        ui.horizontal(|ui| {
-                            ui.label(&r.label);
-                            ui.label(RichText::new(&r.sha256).monospace().small());
-                        });
+                    for (page, rows) in &self.ms_hashes {
+                        ui.strong(page);
+                        for r in rows {
+                            ui.horizontal(|ui| {
+                                ui.label(&r.label);
+                                ui.label(RichText::new(&r.sha256).monospace().small());
+                            });
+                        }
                     }
                 });
             });
@@ -961,6 +1151,7 @@ impl App {
             no_update: self.mct_no_update,
         };
         let args = mct::build_args(&task);
+        let args_ok = mct::validate_args(&args);
         ui.horizontal(|ui| {
             ui.label("Command:");
             ui.label(RichText::new(format!("MediaCreationTool.bat {}", args.join(" "))).monospace());
@@ -970,8 +1161,18 @@ impl App {
                     .on_hover_text("Rename the saved script, e.g. \"auto 26H2 MediaCreationTool.bat\", to run it without this app");
             }
         });
+        if let Err(e) = &args_ok {
+            ui.label(RichText::new(format!("{e:#}")).color(Color32::from_rgb(220, 80, 70)));
+        }
+        let under_temp = util::is_under_temp(&self.cfg.work_dir);
+        if under_temp {
+            ui.label(
+                RichText::new("The work folder is inside the temp directory: the script treats that as 'run from a zip' and writes its ISO to C:\\ESD instead. Pick another work folder in Settings.")
+                    .color(Color32::from_rgb(230, 160, 60)),
+            );
+        }
         ui.horizontal(|ui| {
-            if ui.add_enabled(cfg!(windows), egui::Button::new("Write script and launch")).clicked() {
+            if ui.add_enabled(cfg!(windows) && args_ok.is_ok(), egui::Button::new("Write script and launch")).clicked() {
                 actions.push(Action::McLaunch);
             }
             if ui.button("Open work folder").clicked() {
@@ -981,14 +1182,14 @@ impl App {
             if ui.button("Save a copy of MediaCreationTool.bat…").clicked() {
                 actions.push(Action::SaveScript);
             }
-            if ui.button("Refresh status").clicked() {
-                actions.push(Action::McRefresh);
+            if ui.add_enabled(!self.busy("mct status"), egui::Button::new("Refresh status")).clicked() {
+                self.mct_status_at = None;
             }
         });
         ui.label(RichText::new(format!("Work folder: {}", self.cfg.work_dir.display())).weak().small());
         ui.separator();
-        let stale = self.mct_status_at.map(|t| t.elapsed() > Duration::from_secs(3)).unwrap_or(true);
-        if stale {
+        let stale = self.mct_status_at.map(|t| t.elapsed() > STATUS_INTERVAL).unwrap_or(true);
+        if stale && !self.busy("mct status") {
             actions.push(Action::McRefresh);
         }
         ui.horizontal(|ui| {
@@ -998,11 +1199,11 @@ impl App {
             }
         });
         if self.mct_status.isos.is_empty() {
-            ui.label(RichText::new("No ISO in the work folder yet.").weak());
+            ui.label(RichText::new("No ISO in the work folder or in C:\\ESD yet.").weak());
         } else {
             egui::Grid::new("mct_isos").num_columns(4).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
                 for f in &self.mct_status.isos {
-                    ui.label(f.path.file_name().and_then(|s| s.to_str()).unwrap_or("?"));
+                    ui.label(f.path.display().to_string());
                     ui.label(human_bytes(f.size));
                     ui.label(f.modified.map(|m| chrono::DateTime::<chrono::Local>::from(m).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default());
                     if ui.small_button("Validate").clicked() {
@@ -1013,7 +1214,7 @@ impl App {
             });
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("Tips: 24H2 and newer need a CPU with POPCNT / SSE4.2. Windows 11 media is x64 only. The ISO appears in the work folder when the script prints DONE; validate it here afterwards.").weak().small());
+        ui.label(RichText::new("Tips: 24H2 and newer need a CPU with POPCNT / SSE4.2. Windows 11 media is x64 only. The ISO appears here when the script prints DONE; validate it afterwards.").weak().small());
     }
 
     fn ui_settings(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -1032,13 +1233,13 @@ impl App {
             ui.end_row();
             ui.label("Microsoft page locale");
             ui.add(egui::TextEdit::singleline(&mut self.settings_locale).desired_width(120.0));
-            ui.label(RichText::new("e.g. en-US, de-DE").weak());
+            ui.label(RichText::new("e.g. en-US, de-DE (hash tables are always read from the English pages)").weak());
             ui.end_row();
         });
         if ui.button("Save settings").clicked() {
             actions.push(Action::SaveConfig);
         }
-        ui.label(RichText::new(format!("Stored in {}", config::config_path().display())).weak().small());
+        ui.label(RichText::new(format!("Stored in {}", self.cfg_path.display())).weak().small());
         ui.separator();
         ui.strong("About");
         ui.label("Windows ISO Validator - a portable front end for MediaCreationTool.bat with native ESD / ISO downloading and hash validation.");
@@ -1050,8 +1251,9 @@ impl App {
     }
 
     fn ui_bottom(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        if !self.tasks.is_empty() {
-            for t in &self.tasks {
+        let visible: Vec<&Task> = self.tasks.iter().filter(|t| !t.name.starts_with("mct status")).collect();
+        if !visible.is_empty() {
+            for t in visible {
                 ui.horizontal(|ui| {
                     let done = t.progress.done.load(Ordering::Relaxed);
                     let total = t.progress.total.load(Ordering::Relaxed);
@@ -1094,8 +1296,10 @@ impl eframe::App for App {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         self.poll_tasks();
-        if !self.tasks.is_empty() || self.tab == Tab::CreateMedia {
+        if !self.tasks.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
+        } else if self.tab == Tab::CreateMedia {
+            ctx.request_repaint_after(STATUS_INTERVAL);
         }
         let mut actions: Vec<Action> = Vec::new();
         egui::Panel::top("tabs").show(root, |ui| {
@@ -1133,5 +1337,12 @@ mod tests {
         assert_eq!(mct_lang_code("en-us"), "en-US");
         assert_eq!(mct_lang_code("sr-latn-rs"), "sr-latn-rs");
         assert_eq!(mct_lang_code("zh-cn"), "zh-CN");
+    }
+
+    #[test]
+    fn temp_detection() {
+        let t = std::env::temp_dir();
+        assert!(util::is_under_temp(&t.join("WindowsISOValidator").join("mct")));
+        assert!(!util::is_under_temp(std::path::Path::new("/definitely/not/temp")));
     }
 }

@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,12 +30,31 @@ impl Default for Config {
     }
 }
 
-/// Directory of the executable when it is writable, otherwise the user's temp directory.
+static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Directory of the executable when it is writable, otherwise a folder in the user's profile.
+/// Resolved once per process (the probe creates and deletes a file).
 pub fn portable_base_dir() -> PathBuf {
+    BASE_DIR.get_or_init(resolve_base_dir).clone()
+}
+
+fn resolve_base_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if dir_writable(dir) {
                 return dir.to_path_buf();
+            }
+        }
+    }
+    // Never fall back to the temp directory: MediaCreationTool.bat treats a temp location as
+    // "run from a zip" and writes its ISO to C:\ESD instead of the work folder.
+    for var in ["USERPROFILE", "HOME"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                let dir = PathBuf::from(v).join("WindowsISOValidator");
+                if std::fs::create_dir_all(&dir).is_ok() && dir_writable(&dir) {
+                    return dir;
+                }
             }
         }
     }
