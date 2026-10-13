@@ -9,7 +9,8 @@ Presets
 > _- can keep files and apps on more scenarios where os and target edition does not match_  
 > _- can switch detected edition by adding EditionID to script name_  
 > _- can troubleshoot upgrade failing by adding `no_update` to script name_  
-> _- auto defaults to 11, so pass version as well for 10: `auto 21H2 MediaCreationTool.bat`_  
+> _- auto defaults to the newest 11 (26H2), so pass version as well for 10: `auto 21H2 MediaCreationTool.bat`_  
+> _- windows 11 versions accept both forms: `auto 11_24H2 MediaCreationTool.bat` or `auto 24H2 MediaCreationTool.bat`_  
 
 2 ***Auto ISO*** with detected media in current folder directly _(or C:\ESD if run from zip)_  
 > _- can override detected media by adding edition name / language / arch to script name_  
@@ -32,7 +33,22 @@ Presets
 > _- write `sources\EI.cfg` to prevent product key prompt on Windows 11 consumer media (11 only)_  
 > _- write `AutoUnattend.xml` in boot.wim to enable local account on Windows 11 Home (11 only)_  
 > _- patch `winsetup.dll` in boot.wim to remove windows 11 setup checks when booting from media (11 only)_  
+> _- add `LabConfig` bypass keys into boot.wim registry as well, since 24H2 setup checks moved to hwreqchk (11 24H2+ only)_  
 > _- can disable by adding `def` to script name for a default, untouched MCT media_  
+
+Windows 11 24H2 / 25H2 / 26H2 notes  
+-----------------------------------  
+Since 25H2 the official MCT no longer downloads a static `products.cab`; it asks the Windows Update metadata service  
+for its catalog instead. The 24H2 catalog is still served by Microsoft, so that version works like all the older ones.  
+For 25H2 and 26H2 the script downloads that 24H2 catalog as a template and rewrites its file entries with the 25H2 / 26H2  
+ESD links the official MCT receives, condensed into a table at the end of the script just like the 1607 / 1703 links.  
+The single .bat stays self-contained and every ESD still comes straight from Microsoft servers.  
+> _- any `products<VID>.xml` or `products<VID>.cab` placed next to the script is used instead of the download, for every version_  
+> _- the script refuses to build 24H2+ media when the configured catalog does not list the requested build_  
+> _- on upgrade `auto.cmd` sets the hwreqchk registry variables (the method documented by Rufus) because `/Product Server` is ignored by 24H2+ setup_  
+> _- 24H2 and newer require a CPU with POPCNT / SSE4.2 - that is enforced by the kernel and cannot be bypassed_  
+> _- to refresh the links for a newer build: run the official MCT once, take `C:\$WINDOWS.~WS\Sources\Windows\sources\products.xml`_  
+> _and update the table at the end of the script (ver, client, lang, size, sha256, guid) plus the build label in the `:choice-` block_  
 
 Simple deployment  
 -----------------   
@@ -125,4 +141,14 @@ _We did it! We broke [the previous gist](https://git.io/MediaCreationTool.bat)_ 
 2022.03.18: fix regression with Auto Upgrade; removed powershell -nop arg (issue #41); enhanced 11 AutoUnattend.xml
 2022.03.20: stable - all issues ironed out; improved script ui; upgrade keeping files from Eval editions too
             last squash I promise ;)
+2023.12.09: 10 22H2 19045.2965, 11 22H2 22621.1702, 11 23H2 22631.2861 (community update)
+2026.10.06: 11 24H2 26100.4349, 11 25H2 26200.6899, 11 26H2 26300.9457 - 26H2 is now the default choice
+            25H2+ MCT gets its catalog from the update service, so the script rebuilds it from the microsoft 24H2 one
+            with the 25H2 / 26H2 esd links embedded at the end of the script (every link checked against microsoft
+            servers) - single self-contained .bat as always; any products<VID>.xml or .cab next to the script overrides
+            the download; refuse to build media when the catalog does not list the requested build
+            24H2+ upgrade checks skipped via hwreqchk registry vars in auto.cmd, /Product Server trick dropped there;
+            LabConfig bypass keys also written into boot.wim for clean installs
+            fixed GUI choice being lost after self-elevation for all 11 versions; fixed dead 10 22H2 MCT exe link
+            accepts plain 24H2 / 25H2 / 26H2 as version arguments: "auto 26H2 MediaCreationTool.bat"
 ```
